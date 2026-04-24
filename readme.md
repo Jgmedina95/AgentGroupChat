@@ -72,6 +72,43 @@ Allow agents to have different tool access, memory policies, budgets, objectives
 5. Evaluation and replay.
 Add metrics, run summaries, reproducibility controls, and scenario comparison workflows.
 
+## Current architecture
+
+```mermaid
+flowchart LR
+	Browser[Browser Viewer]
+	TUI[Textual TUI]
+	Scripts[Admin and Seed Scripts]
+	API[FastAPI API]
+	WS[WebSocket Channels]
+	DB[(SQLite today / PostgreSQL later)]
+	Runtime[Future Agent Runtime Layer]
+	Scenarios[Future Scenario Engine]
+
+	Browser --> WS
+	TUI --> API
+	TUI --> WS
+	Scripts --> API
+	API --> DB
+	API --> WS
+	Runtime --> API
+	Runtime --> Scenarios
+	Scenarios --> API
+```
+
+Current reality:
+
+- FastAPI owns the REST and websocket surface.
+- SQLite is the active local persistence layer.
+- The Textual TUI and browser viewer act as clients of the API.
+- Seed and reset scripts can use the API path so the UI gets live updates.
+
+Planned evolution:
+
+- replace or supplement SQLite with PostgreSQL for larger runs
+- add agent runtimes with different tools, memory, and context budgets
+- add scenario policies and reward logic on top of the chat substrate
+
 ## Run locally
 
 ```bash
@@ -79,6 +116,14 @@ Add metrics, run summaries, reproducibility controls, and scenario comparison wo
 .venv/bin/python -m pip install -r requirements.txt
 .venv/bin/uvicorn main:app --reload
 ```
+
+## Run tests
+
+```bash
+.venv/bin/python -m pytest
+```
+
+The current test suite is intentionally small and focused on the main API flow: create agents, create conversations, send messages, receive websocket events, and delete conversations.
 
 ## Available endpoints
 

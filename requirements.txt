@@ -4,3 +4,4 @@ uvicorn
 httpx
 textual
 websockets
+pytest
