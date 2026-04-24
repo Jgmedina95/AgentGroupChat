@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Conversation WebSocket Viewer</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4efe6;
+      --panel: #fffaf2;
+      --ink: #1f1a17;
+      --muted: #6f645c;
+      --accent: #b85c38;
+      --accent-strong: #8e3f20;
+      --border: #dbcdbf;
+      --success: #2f7d4a;
+      --error: #a12f2f;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Georgia, "Times New Roman", serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(184, 92, 56, 0.18), transparent 25%),
+        radial-gradient(circle at bottom right, rgba(47, 125, 74, 0.12), transparent 30%),
+        var(--bg);
+    }
+
+    .shell {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 32px 20px 48px;
+    }
+
+    .hero {
+      margin-bottom: 24px;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: clamp(2rem, 4vw, 3.5rem);
+      line-height: 1;
+      letter-spacing: -0.03em;
+    }
+
+    .subtitle {
+      margin: 0;
+      max-width: 640px;
+      color: var(--muted);
+      font-size: 1rem;
+      line-height: 1.6;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      box-shadow: 0 18px 50px rgba(31, 26, 23, 0.08);
+      overflow: hidden;
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: 1fr auto auto auto;
+      gap: 12px;
+      padding: 20px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    label {
+      display: grid;
+      gap: 8px;
+      font-size: 0.9rem;
+      color: var(--muted);
+    }
+
+    input {
+      width: 100%;
+      padding: 14px 16px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #fff;
+      color: var(--ink);
+      font: inherit;
+    }
+
+    button {
+      align-self: end;
+      padding: 14px 18px;
+      border: 0;
+      border-radius: 12px;
+      background: var(--accent);
+      color: #fff;
+      font: inherit;
+      cursor: pointer;
+      transition: transform 160ms ease, background 160ms ease;
+    }
+
+    button:hover {
+      background: var(--accent-strong);
+      transform: translateY(-1px);
+    }
+
+    button.secondary {
+      background: #e7dbcf;
+      color: var(--ink);
+    }
+
+    button.secondary:hover {
+      background: #dac9b8;
+    }
+
+    .status-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(111, 100, 92, 0.12);
+      color: var(--ink);
+    }
+
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--muted);
+    }
+
+    .status-pill.connected .status-dot {
+      background: var(--success);
+    }
+
+    .status-pill.error .status-dot {
+      background: var(--error);
+    }
+
+    .events {
+      padding: 20px;
+      min-height: 320px;
+      max-height: 60vh;
+      overflow: auto;
+      display: grid;
+      gap: 12px;
+    }
+
+    .event-card {
+      padding: 14px 16px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.75);
+    }
+
+    .event-meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 8px;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.92rem;
+      line-height: 1.5;
+    }
+
+    .empty {
+      color: var(--muted);
+      border: 1px dashed var(--border);
+      border-radius: 14px;
+      padding: 18px;
+      text-align: center;
+    }
+
+    @media (max-width: 720px) {
+      .controls {
+        grid-template-columns: 1fr;
+      }
+
+      button {
+        width: 100%;
+      }
+
+      .status-row {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="hero">
+      <h1>Live Conversation Feed</h1>
+      <p class="subtitle">
+        Open a websocket to one conversation and watch `connection.ready`, `message.created`, and `message.deleted`
+        events arrive in real time.
+      </p>
+    </div>
+
+    <section class="panel">
+      <div class="controls">
+        <label>
+          Conversation ID
+          <input id="conversationId" type="text" placeholder="222dbb88-4dd8-4318-ae39-554595e15bed">
+        </label>
+        <button id="connectButton" type="button">Connect</button>
+        <button id="disconnectButton" class="secondary" type="button">Disconnect</button>
+        <button id="clearButton" class="secondary" type="button">Clear Log</button>
+      </div>
+
+      <div class="status-row">
+        <div id="statusPill" class="status-pill">
+          <span class="status-dot"></span>
+          <span id="statusText">Disconnected</span>
+        </div>
+        <div id="endpointText">ws://localhost:8000/ws/conversations/&lt;conversation_id&gt;</div>
+      </div>
+
+      <div id="events" class="events">
+        <div id="emptyState" class="empty">No events yet. Connect to a conversation and then post messages through the API.</div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const conversationInput = document.getElementById("conversationId");
+    const connectButton = document.getElementById("connectButton");
+    const disconnectButton = document.getElementById("disconnectButton");
+    const clearButton = document.getElementById("clearButton");
+    const statusPill = document.getElementById("statusPill");
+    const statusText = document.getElementById("statusText");
+    const endpointText = document.getElementById("endpointText");
+    const eventsContainer = document.getElementById("events");
+    const emptyState = document.getElementById("emptyState");
+
+    const params = new URLSearchParams(window.location.search);
+    const defaultConversationId = params.get("conversationId") || "";
+    if (defaultConversationId) {
+      conversationInput.value = defaultConversationId;
+    }
+
+    let socket = null;
+
+    function setStatus(label, mode = "idle") {
+      statusText.textContent = label;
+      statusPill.classList.remove("connected", "error");
+      if (mode === "connected") {
+        statusPill.classList.add("connected");
+      }
+      if (mode === "error") {
+        statusPill.classList.add("error");
+      }
+    }
+
+    function renderEvent(title, payload) {
+      emptyState.style.display = "none";
+
+      const card = document.createElement("article");
+      card.className = "event-card";
+
+      const meta = document.createElement("div");
+      meta.className = "event-meta";
+      meta.innerHTML = `<strong>${title}</strong><span>${new Date().toLocaleTimeString()}</span>`;
+
+      const pre = document.createElement("pre");
+      pre.textContent = JSON.stringify(payload, null, 2);
+
+      card.appendChild(meta);
+      card.appendChild(pre);
+      eventsContainer.prepend(card);
+    }
+
+    function disconnect() {
+      if (socket) {
+        socket.close();
+        socket = null;
+      }
+      setStatus("Disconnected");
+    }
+
+    function connect() {
+      const conversationId = conversationInput.value.trim();
+      if (!conversationId) {
+        setStatus("Conversation ID required", "error");
+        conversationInput.focus();
+        return;
+      }
+
+      disconnect();
+
+      const endpoint = `ws://localhost:8000/ws/conversations/${encodeURIComponent(conversationId)}`;
+      endpointText.textContent = endpoint;
+      setStatus("Connecting...");
+
+      socket = new WebSocket(endpoint);
+
+      socket.onopen = () => {
+        setStatus("Connected", "connected");
+        renderEvent("socket.open", { endpoint });
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          renderEvent("socket.message", JSON.parse(event.data));
+        } catch {
+          renderEvent("socket.message", { raw: event.data });
+        }
+      };
+
+      socket.onerror = () => {
+        setStatus("Connection error", "error");
+        renderEvent("socket.error", { message: "Check the server and conversation ID." });
+      };
+
+      socket.onclose = (event) => {
+        setStatus(`Closed (${event.code})`, event.code === 1000 ? "idle" : "error");
+        renderEvent("socket.close", { code: event.code, reason: event.reason || "No reason provided" });
+        socket = null;
+      };
+    }
+
+    connectButton.addEventListener("click", connect);
+    disconnectButton.addEventListener("click", disconnect);
+    clearButton.addEventListener("click", () => {
+      eventsContainer.innerHTML = "";
+      eventsContainer.appendChild(emptyState);
+      emptyState.style.display = "block";
+    });
+
+    conversationInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        connect();
+      }
+    });
+  </script>
+</body>
+</html>
