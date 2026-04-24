@@ -1,6 +1,32 @@
 # AgentGroupChat
 
-This is a repo that can host different LLMs inside a "group chat"
+AgentGroupChat is a chat harness for LLMs and other agents. The long-term goal is to simulate groups of participants with different tools, private and public channels, distinct incentives, and different access to context, then observe how those constraints affect coordination, persuasion, trust, and profit-seeking behavior.
+
+The project is intended to grow into a reusable environment for running scenario-driven agent simulations, not just a simple chat clone.
+
+## Vision
+
+The target system should support:
+
+- multiple agent types, including LLMs, scripted agents, and human-controlled users
+- public and private conversations
+- different context windows, memories, and tool access per agent
+- scenario-specific rules, goals, and reward functions
+- real-time observation through a browser client and terminal UI
+- reproducible simulation runs for experimentation and comparison
+
+## Target scenarios
+
+Examples of the kinds of simulations this project is aiming toward:
+
+1. Stock market tipster ecosystems.
+Agents compete for followers and revenue, decide what to say in public versus private chats, split free versus paid tips, and interact with users who have budgets and policy constraints such as following only public calls or only certain tipsters.
+
+2. Research collaboration games.
+Specialized agents coordinate through chat to distribute tasks, share partial findings, and build a final report while balancing cooperation, specialization, and information flow.
+
+3. Game-theory and incentive experiments.
+Agents optimize for individual rewards under different communication rules, trust assumptions, and market or coordination structures.
 
 Requirements:
 - Messages are sent in order.
@@ -10,15 +36,41 @@ Requirements:
 Non-Functional Requirements:
 - Messages are stored in-memory of each "Device" for 6 hrs.
 
-## Day 1 status
+## Current status
 
-The project now includes a runnable FastAPI API with:
+The project currently includes a runnable backend and local tooling foundation:
 
 - SQLite-backed persistence for agents, conversations, and messages.
 - Conversation membership tracking for participant-aware chats.
 - Ordered message retrieval per conversation.
 - Soft-delete support for messages.
-- Local project dependencies in `requirements.txt`.
+- Real-time websocket updates for messages and conversation create/delete events.
+- A Textual terminal UI for browsing conversations and message streams.
+- Admin scripts for resetting data and simulating example chat flows.
+
+What is not built yet:
+
+- real LLM runtime orchestration
+- per-agent tool and context isolation
+- scenario engines for markets, research teams, or game-theory experiments
+- metrics, replay tooling, and evaluation harnesses
+
+## Roadmap
+
+1. Core platform.
+Stabilize the FastAPI API, websocket channels, persistence model, and TUI/browser observability.
+
+2. Agent runtime layer.
+Add pluggable runtimes for LLM agents, rule-based agents, and human participants, each with separate context, memory, and permissions.
+
+3. Scenario engine.
+Support scenario-specific rules, scheduled events, public/private channel policies, and simulation timing controls.
+
+4. Tool and context isolation.
+Allow agents to have different tool access, memory policies, budgets, objectives, and hidden information.
+
+5. Evaluation and replay.
+Add metrics, run summaries, reproducibility controls, and scenario comparison workflows.
 
 ## Run locally
 
