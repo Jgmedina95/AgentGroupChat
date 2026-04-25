@@ -18,8 +18,6 @@ from tui.state.store import AppStore, ConversationRecord, MessageRecord
 
 
 class ChatAdminApp(App[None]):
-    BACKGROUND_SYNC_INTERVAL = float(os.getenv("AGENT_CHAT_TUI_SYNC_INTERVAL", "0.5"))
-
     CSS = """
     Screen {
         layout: vertical;
@@ -91,7 +89,6 @@ class ChatAdminApp(App[None]):
         self.websocket_task: asyncio.Task[None] | None = None
         self.conversation_list_stop = asyncio.Event()
         self.conversation_list_task: asyncio.Task[None] | None = None
-        self.background_sync_task: asyncio.Task[None] | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -118,10 +115,8 @@ class ChatAdminApp(App[None]):
                 self.conversation_list_stop,
             )
         )
-        self.background_sync_task = asyncio.create_task(self.background_sync_loop())
 
     async def on_unmount(self) -> None:
-        await self.shutdown_background_sync()
         await self.shutdown_conversation_list_websocket()
         await self.shutdown_websocket()
         await self.api_client.aclose()
@@ -242,61 +237,6 @@ class ChatAdminApp(App[None]):
             await self.conversation_list_task
         self.conversation_list_task = None
 
-    async def shutdown_background_sync(self) -> None:
-        if self.background_sync_task is None:
-            return
-
-        self.background_sync_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await self.background_sync_task
-        self.background_sync_task = None
-
-    async def background_sync_loop(self) -> None:
-        while True:
-            await asyncio.sleep(self.BACKGROUND_SYNC_INTERVAL)
-            await self.sync_live_data()
-
-    async def sync_live_data(self) -> None:
-        try:
-            agents, conversations = await asyncio.gather(
-                self.api_client.list_agents(),
-                self.api_client.list_conversations(),
-            )
-        except httpx.HTTPError:
-            return
-
-        previous_selection = self.store.selected_conversation_id
-        previous_conversation_ids = {conversation.id for conversation in self.store.conversations}
-        next_conversation_ids = {conversation.id for conversation in conversations}
-
-        self.store.set_agents(agents)
-        self.store.set_conversations(conversations)
-        self.refresh_conversation_table()
-
-        if previous_selection is not None and previous_selection not in next_conversation_ids:
-            await self.clear_conversation_view()
-            self.set_status("Selected conversation no longer exists. Choose another one from the list.")
-            return
-
-        if previous_selection is None:
-            if previous_conversation_ids != next_conversation_ids:
-                if conversations:
-                    self.set_status("Conversation list updated.")
-                else:
-                    self.set_status("No conversations found. Create one through the API first.")
-            return
-
-        try:
-            messages = await self.api_client.list_messages(previous_selection)
-        except httpx.HTTPError:
-            return
-
-        current_messages = self.store.get_messages(previous_selection)
-        if current_messages != messages:
-            self.store.set_messages(previous_selection, messages)
-            self.render_messages(previous_selection)
-            self.set_status("Conversation updated.")
-
     async def handle_websocket_event(self, event: dict) -> None:
         event_name = event.get("event", "unknown")
         if event_name == "connection.ready":
@@ -323,19 +263,34 @@ class ChatAdminApp(App[None]):
             return
 
         if event_name == "conversation.created":
-            await self.sync_live_data()
+            payload = event.get("data")
+            if not isinstance(payload, dict):
+                self.set_status("Conversation created event was malformed.")
+                return
+
+            conversation = ConversationRecord.from_dict(payload)
+            self.store.upsert_conversation(conversation)
+            self.refresh_conversation_table()
             self.set_status("Conversation list updated.")
             return
 
         if event_name == "conversation.deleted":
             payload = event.get("data")
             conversation_id = payload.get("id") if isinstance(payload, dict) else None
+            if conversation_id is None:
+                self.set_status("Conversation deleted event was malformed.")
+                return
+
+            removed = self.store.remove_conversation(conversation_id)
+            if not removed:
+                return
+
+            self.refresh_conversation_table()
             if conversation_id == self.store.selected_conversation_id:
                 await self.clear_conversation_view()
-                await self.sync_live_data()
                 self.set_status("Selected conversation was deleted.")
                 return
-            await self.sync_live_data()
+
             self.set_status("Conversation removed.")
 
     async def on_data_table_row_selected(self, event: ConversationTable.RowSelected) -> None:

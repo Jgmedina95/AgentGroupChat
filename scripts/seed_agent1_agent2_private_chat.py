@@ -6,7 +6,6 @@ import time
 from pathlib import Path
 
 import httpx
-from sqlalchemy import select
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -15,8 +14,8 @@ if str(REPO_ROOT) not in sys.path:
 
 
 from db.session import SessionLocal
-from models import Agent
-from services.message_service import create_conversation, create_message
+from models import Member
+from services.message_service import create_conversation, create_message, list_members
 
 
 AGENT_SPECS = {
@@ -29,23 +28,22 @@ DEFAULT_ACTION_DELAY_SECONDS = 1.5
 DEFAULT_MESSAGE_DELAY_SECONDS = 2.0
 
 
-def resolve_agent(db, display_name: str, agent_type: str) -> Agent:
-    matches = list(
-        db.scalars(
-            select(Agent)
-            .where(Agent.display_name == display_name, Agent.type == agent_type)
-            .order_by(Agent.id.asc())
-        ).all()
-    )
+def resolve_member(db, display_name: str, member_type: str) -> Member:
+    matches = [
+        member
+        for member in list_members(db)
+        if member.display_name == display_name and member.type == member_type
+    ]
+    matches.sort(key=lambda member: member.id)
 
     if not matches:
-        raise SystemExit(f"Missing required agent: {display_name} ({agent_type})")
+        raise SystemExit(f"Missing required member: {display_name} ({member_type})")
 
     if len(matches) > 1:
         chosen = matches[-1]
-        duplicate_ids = ", ".join(agent.id for agent in matches)
+        duplicate_ids = ", ".join(member.id for member in matches)
         print(
-            f"Multiple matches for {display_name} ({agent_type}). "
+            f"Multiple matches for {display_name} ({member_type}). "
             f"Using {chosen.id}. Candidates: {duplicate_ids}"
         )
         return chosen
@@ -169,9 +167,10 @@ def api_is_available(base_url: str) -> bool:
 
 
 def seed_via_db(args: argparse.Namespace) -> None:
-    with SessionLocal() as db:
+    db = SessionLocal()
+    try:
         agents = {
-            name: resolve_agent(db, name, agent_type)
+            name: resolve_member(db, name, agent_type)
             for name, agent_type in AGENT_SPECS.items()
         }
 
@@ -191,6 +190,8 @@ def seed_via_db(args: argparse.Namespace) -> None:
             print(f"[{conversation.title}] {sender_name}: {content}")
             if not args.no_delay:
                 sleep_with_log(args.message_delay, "the next private message")
+    finally:
+        db.close()
 
 
 def main() -> None:

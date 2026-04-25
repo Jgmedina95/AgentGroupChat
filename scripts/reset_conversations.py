@@ -5,7 +5,6 @@ import sys
 from pathlib import Path
 
 import httpx
-from sqlalchemy import select
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -14,7 +13,6 @@ if str(REPO_ROOT) not in sys.path:
 
 
 from db.session import SessionLocal
-from models import Conversation
 
 
 DEFAULT_API_BASE_URL = "http://localhost:8000/api"
@@ -58,14 +56,13 @@ def delete_via_api(base_url: str) -> None:
 
 
 def delete_via_db() -> None:
-    with SessionLocal() as db:
-        conversations = list(db.scalars(select(Conversation)).all())
-        deleted_count = len(conversations)
-
-        for conversation in conversations:
-            db.delete(conversation)
-
+    db = SessionLocal()
+    try:
+        deleted_count = db.execute("SELECT COUNT(*) AS conversation_count FROM conversations").fetchone()["conversation_count"]
+        db.execute("DELETE FROM conversations")
         db.commit()
+    finally:
+        db.close()
 
     print(f"Deleted {deleted_count} conversation(s).")
 

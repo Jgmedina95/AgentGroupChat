@@ -5,7 +5,6 @@ from collections import defaultdict
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
 from db.session import SessionLocal
-from models import Conversation
 
 
 router = APIRouter()
@@ -43,8 +42,12 @@ conversation_list_manager = ConnectionManager()
 
 
 def conversation_exists(conversation_id: str) -> bool:
-	with SessionLocal() as db:
-		return db.get(Conversation, conversation_id) is not None
+	db = SessionLocal()
+	try:
+		row = db.execute("SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
+		return row is not None
+	finally:
+		db.close()
 
 
 @router.websocket("/ws/conversations")

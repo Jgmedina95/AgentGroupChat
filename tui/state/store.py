@@ -75,6 +75,22 @@ class AppStore:
     def set_conversations(self, conversations: list[ConversationRecord]) -> None:
         self.conversations = conversations
 
+    def upsert_conversation(self, conversation: ConversationRecord) -> None:
+        for index, current in enumerate(self.conversations):
+            if current.id == conversation.id:
+                self.conversations[index] = conversation
+                break
+        else:
+            self.conversations.append(conversation)
+
+        self.conversations.sort(key=lambda item: ((item.title or item.id).lower(), item.id))
+
+    def remove_conversation(self, conversation_id: str) -> bool:
+        original_count = len(self.conversations)
+        self.conversations = [conversation for conversation in self.conversations if conversation.id != conversation_id]
+        self.messages_by_conversation.pop(conversation_id, None)
+        return len(self.conversations) != original_count
+
     def set_messages(self, conversation_id: str, messages: list[MessageRecord]) -> None:
         self.messages_by_conversation[conversation_id] = sorted(messages, key=lambda message: message.created_at)
 

@@ -1,65 +1,59 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, JSON, String, Text, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from db.base import Base
-
-
-class Agent(Base):
-    __tablename__ = "agents"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    type: Mapped[str] = mapped_column(String(50), nullable=False)
-    display_name: Mapped[str] = mapped_column(String(100), nullable=False)
-    config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-
-    messages: Mapped[list[Message]] = relationship(back_populates="sender")
-    conversation_memberships: Mapped[list[ConversationParticipant]] = relationship(back_populates="agent")
+@dataclass(slots=True)
+class Member:
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    type: str = ""
+    display_name: str = ""
+    config: dict | None = None
 
 
-class Conversation(Base):
-    __tablename__ = "conversations"
+@dataclass(slots=True)
+class Membership:
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    conversation_id: str = ""
+    member_id: str = ""
+    status: str = "active"
+    role: str = "member"
+    invited_by_member_id: str | None = None
+    joined_at: datetime | None = None
+    left_at: datetime | None = None
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    type: Mapped[str] = mapped_column(String(50), nullable=False)
-    title: Mapped[str | None] = mapped_column(String(200), nullable=True)
-
-    messages: Mapped[list[Message]] = relationship(
-        back_populates="conversation",
-        cascade="all, delete-orphan",
-        order_by="Message.created_at",
-    )
-    participants: Mapped[list[ConversationParticipant]] = relationship(
-        back_populates="conversation",
-        cascade="all, delete-orphan",
-    )
+    @property
+    def agent_id(self) -> str:
+        return self.member_id
 
 
-class ConversationParticipant(Base):
-    __tablename__ = "conversation_participants"
-    __table_args__ = (UniqueConstraint("conversation_id", "agent_id", name="uq_conversation_agent"),)
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id"), nullable=False, index=True)
-    agent_id: Mapped[str] = mapped_column(ForeignKey("agents.id"), nullable=False, index=True)
-
-    conversation: Mapped[Conversation] = relationship(back_populates="participants")
-    agent: Mapped[Agent] = relationship(back_populates="conversation_memberships")
+@dataclass(slots=True)
+class Message:
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    conversation_id: str = ""
+    sender_id: str = ""
+    content: str = ""
+    created_at: datetime = field(default_factory=datetime.utcnow)
+    deleted_at: datetime | None = None
 
 
-class Message(Base):
-    __tablename__ = "messages"
+@dataclass(slots=True)
+class Conversation:
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    type: str = ""
+    title: str | None = None
+    created_by_member_id: str | None = None
+    join_policy: str = "invite_only"
+    status: str = "active"
+    memberships: list[Membership] = field(default_factory=list)
+    messages: list[Message] = field(default_factory=list)
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id"), nullable=False, index=True)
-    sender_id: Mapped[str] = mapped_column(ForeignKey("agents.id"), nullable=False, index=True)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    @property
+    def participants(self) -> list[Membership]:
+        return self.memberships
 
-    conversation: Mapped[Conversation] = relationship(back_populates="messages")
-    sender: Mapped[Agent] = relationship(back_populates="messages")
+
+Agent = Member
+ConversationParticipant = Membership

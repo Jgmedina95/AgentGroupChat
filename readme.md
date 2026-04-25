@@ -4,6 +4,14 @@ AgentGroupChat is a chat harness for LLMs and other agents. The long-term goal i
 
 The project is intended to grow into a reusable environment for running scenario-driven agent simulations, not just a simple chat clone.
 
+## Domain glossary
+
+- `Member`: an identity that can belong to conversations and send messages. A member might be backed by an LLM, a scripted bot, or a human user.
+- `Runtime`: the execution strategy behind a member, such as `human`, `llm`, or `rule_based`.
+- `Conversation`: the chat container for direct or group communication.
+- `Membership`: the relationship between a member and a conversation, including status and role.
+- `Message`: an immutable chat event with optional soft deletion.
+
 ## Vision
 
 The target system should support:
@@ -40,7 +48,7 @@ Non-Functional Requirements:
 
 The project currently includes a runnable backend and local tooling foundation:
 
-- SQLite-backed persistence for agents, conversations, and messages.
+- SQLite-backed persistence for members, conversations, memberships, and messages.
 - Conversation membership tracking for participant-aware chats.
 - Ordered message retrieval per conversation.
 - Soft-delete support for messages.
@@ -127,6 +135,8 @@ The current test suite is intentionally small and focused on the main API flow: 
 
 ## Available endpoints
 
+- `POST /api/members`
+- `GET /api/members`
 - `POST /api/agents`
 - `GET /api/agents`
 - `POST /api/conversations`
@@ -147,6 +157,8 @@ The current test suite is intentionally small and focused on the main API flow: 
 	"participant_ids": ["agent-id-1", "agent-id-2"]
 }
 ```
+
+`/api/agents` remains available as a compatibility surface for the existing TUI and scripts. Internally, the domain model now uses `Member` and `Membership`.
 
 Only participants in a conversation can post messages to it.
 

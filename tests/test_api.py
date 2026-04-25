@@ -1,27 +1,24 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
 import api.websockets as websocket_module
-from db.base import Base
-from db.session import get_db
+from db.session import create_connection, get_db, init_db
 from main import app
 
 
 @pytest.fixture
 def client(tmp_path: Path):
     database_path = tmp_path / "test.db"
-    engine = create_engine(
-        f"sqlite:///{database_path}",
-        connect_args={"check_same_thread": False},
-    )
-    testing_session_local = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    Base.metadata.create_all(bind=engine)
+
+    init_db(database_path)
+
+    def testing_session_local() -> sqlite3.Connection:
+        return create_connection(database_path)
 
     def override_get_db():
         db = testing_session_local()
@@ -39,7 +36,6 @@ def client(tmp_path: Path):
 
     app.dependency_overrides.clear()
     websocket_module.SessionLocal = original_session_local
-    engine.dispose()
 
 
 def test_agent_conversation_message_flow(client: TestClient) -> None:

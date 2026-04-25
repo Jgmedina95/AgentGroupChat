@@ -1,14 +1,14 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy.orm import Session
 
 from db.session import get_db
 from api.websockets import conversation_list_manager, manager
-from models import Agent, Conversation, Message
+from models import Conversation, Member, Message
 from services.message_service import (
 	create_agent,
 	create_conversation,
@@ -71,8 +71,24 @@ class MessageRead(BaseModel):
 	deleted_at: datetime | None
 
 
+def serialize_member(member: Member) -> AgentRead:
+	return AgentRead(
+		id=member.id,
+		type=member.type,
+		display_name=member.display_name,
+		config=member.config,
+	)
+
+
 def serialize_message(message: Message) -> MessageRead:
-	return MessageRead.model_validate(message)
+	return MessageRead(
+		id=message.id,
+		conversation_id=message.conversation_id,
+		sender_id=message.sender_id,
+		content=message.content,
+		created_at=message.created_at,
+		deleted_at=message.deleted_at,
+	)
 
 
 def serialize_conversation(conversation: Conversation) -> ConversationRead:
@@ -86,22 +102,32 @@ def serialize_conversation(conversation: Conversation) -> ConversationRead:
 
 
 @router.get("/agents", response_model=list[AgentRead])
-def list_agents_route(db: Session = Depends(get_db)) -> list[Agent]:
-	return list_agents(db)
+def list_agents_route(db: sqlite3.Connection = Depends(get_db)) -> list[AgentRead]:
+	return [serialize_member(member) for member in list_agents(db)]
+
+
+@router.get("/members", response_model=list[AgentRead])
+def list_members_route(db: sqlite3.Connection = Depends(get_db)) -> list[AgentRead]:
+	return [serialize_member(member) for member in list_agents(db)]
 
 
 @router.get("/conversations", response_model=list[ConversationRead])
-def list_conversations_route(db: Session = Depends(get_db)) -> list[ConversationRead]:
+def list_conversations_route(db: sqlite3.Connection = Depends(get_db)) -> list[ConversationRead]:
 	return [serialize_conversation(conversation) for conversation in list_conversations(db)]
 
 
 @router.post("/agents", response_model=AgentRead, status_code=status.HTTP_201_CREATED)
-def create_agent_route(payload: AgentCreate, db: Session = Depends(get_db)) -> Agent:
-	return create_agent(db, agent_type=payload.type, display_name=payload.display_name, config=payload.config)
+def create_agent_route(payload: AgentCreate, db: sqlite3.Connection = Depends(get_db)) -> AgentRead:
+	return serialize_member(create_agent(db, agent_type=payload.type, display_name=payload.display_name, config=payload.config))
+
+
+@router.post("/members", response_model=AgentRead, status_code=status.HTTP_201_CREATED)
+def create_member_route(payload: AgentCreate, db: sqlite3.Connection = Depends(get_db)) -> AgentRead:
+	return serialize_member(create_agent(db, agent_type=payload.type, display_name=payload.display_name, config=payload.config))
 
 
 @router.post("/conversations", response_model=ConversationRead, status_code=status.HTTP_201_CREATED)
-async def create_conversation_route(payload: ConversationCreate, db: Session = Depends(get_db)) -> ConversationRead:
+async def create_conversation_route(payload: ConversationCreate, db: sqlite3.Connection = Depends(get_db)) -> ConversationRead:
 	conversation = create_conversation(
 		db,
 		conversation_type=payload.type,
@@ -117,7 +143,7 @@ async def create_conversation_route(payload: ConversationCreate, db: Session = D
 
 
 @router.delete("/conversations/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_conversation_route(conversation_id: str, db: Session = Depends(get_db)) -> None:
+async def delete_conversation_route(conversation_id: str, db: sqlite3.Connection = Depends(get_db)) -> None:
 	delete_conversation(db, conversation_id)
 	await conversation_list_manager.broadcast(
 		"__all_conversations__",
@@ -126,7 +152,7 @@ async def delete_conversation_route(conversation_id: str, db: Session = Depends(
 
 
 @router.post("/messages", response_model=MessageRead, status_code=status.HTTP_201_CREATED)
-async def create_message_route(payload: MessageCreate, db: Session = Depends(get_db)) -> MessageRead:
+async def create_message_route(payload: MessageCreate, db: sqlite3.Connection = Depends(get_db)) -> MessageRead:
 	message = create_message(
 		db,
 		conversation_id=payload.conversation_id,
@@ -145,13 +171,13 @@ async def create_message_route(payload: MessageCreate, db: Session = Depends(get
 def list_messages_route(
 	conversation_id: str,
 	include_deleted: bool = False,
-	db: Session = Depends(get_db),
-) -> list[Message]:
-	return list_messages(db, conversation_id=conversation_id, include_deleted=include_deleted)
+	db: sqlite3.Connection = Depends(get_db),
+) -> list[MessageRead]:
+	return [serialize_message(message) for message in list_messages(db, conversation_id=conversation_id, include_deleted=include_deleted)]
 
 
 @router.delete("/messages/{message_id}", response_model=MessageRead)
-async def delete_message_route(message_id: str, db: Session = Depends(get_db)) -> MessageRead:
+async def delete_message_route(message_id: str, db: sqlite3.Connection = Depends(get_db)) -> MessageRead:
 	message = delete_message(db, message_id=message_id)
 	message_read = serialize_message(message)
 	await manager.broadcast(
