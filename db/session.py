@@ -77,6 +77,19 @@ def _ensure_conversations_schema(connection: sqlite3.Connection) -> None:
 		connection.execute("ALTER TABLE conversations ADD COLUMN join_policy TEXT NOT NULL DEFAULT 'invite_only'")
 	if "status" not in columns:
 		connection.execute("ALTER TABLE conversations ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
+	if "messages_paused" not in columns:
+		connection.execute("ALTER TABLE conversations ADD COLUMN messages_paused INTEGER NOT NULL DEFAULT 0")
+	if "message_pause_notice" not in columns:
+		connection.execute("ALTER TABLE conversations ADD COLUMN message_pause_notice TEXT")
+
+
+def _ensure_members_schema(connection: sqlite3.Connection) -> None:
+	if not _table_exists(connection, "members"):
+		return
+
+	columns = _table_columns(connection, "members")
+	if "member_type" not in columns:
+		connection.execute("ALTER TABLE members ADD COLUMN member_type TEXT NOT NULL DEFAULT 'user_regular'")
 
 
 def _ensure_memberships_schema(connection: sqlite3.Connection) -> None:
@@ -107,8 +120,8 @@ def _backfill_members_from_agents(connection: sqlite3.Connection) -> None:
 
 	connection.execute(
 		"""
-		INSERT INTO members (id, type, display_name, config)
-		SELECT agents.id, agents.type, agents.display_name, agents.config
+		INSERT INTO members (id, type, member_type, display_name, config)
+		SELECT agents.id, agents.type, 'user_regular', agents.display_name, agents.config
 		FROM agents
 		LEFT JOIN members ON members.id = agents.id
 		WHERE members.id IS NULL
@@ -176,10 +189,14 @@ def _backfill_conversation_defaults(connection: sqlite3.Connection) -> None:
 	connection.execute(
 		"UPDATE conversations SET status = 'active' WHERE status IS NULL OR status = ''"
 	)
+	connection.execute(
+		"UPDATE conversations SET messages_paused = 0 WHERE messages_paused IS NULL"
+	)
 
 
 def _migrate_existing_schema(connection: sqlite3.Connection) -> None:
 	_ensure_members_table(connection)
+	_ensure_members_schema(connection)
 	_ensure_conversations_schema(connection)
 	_ensure_memberships_schema(connection)
 	_backfill_members_from_agents(connection)
@@ -198,6 +215,7 @@ def init_db(database_path: str | Path | None = None) -> None:
 			CREATE TABLE IF NOT EXISTS members (
 				id TEXT PRIMARY KEY,
 				type TEXT NOT NULL,
+				member_type TEXT NOT NULL DEFAULT 'user_regular',
 				display_name TEXT NOT NULL,
 				config TEXT
 			);
@@ -208,7 +226,9 @@ def init_db(database_path: str | Path | None = None) -> None:
 				title TEXT,
 				created_by_member_id TEXT REFERENCES members(id),
 				join_policy TEXT NOT NULL DEFAULT 'invite_only',
-				status TEXT NOT NULL DEFAULT 'active'
+				status TEXT NOT NULL DEFAULT 'active',
+				messages_paused INTEGER NOT NULL DEFAULT 0,
+				message_pause_notice TEXT
 			);
 
 			CREATE TABLE IF NOT EXISTS memberships (

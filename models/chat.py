@@ -9,6 +9,7 @@ from datetime import datetime
 class Member:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     type: str = ""
+    member_type: str = "user_regular"
     display_name: str = ""
     config: dict | None = None
 
@@ -47,6 +48,8 @@ class Conversation:
     created_by_member_id: str | None = None
     join_policy: str = "invite_only"
     status: str = "active"
+    messages_paused: bool = False
+    message_pause_notice: str | None = None
     memberships: list[Membership] = field(default_factory=list)
     messages: list[Message] = field(default_factory=list)
 

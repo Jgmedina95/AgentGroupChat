@@ -411,6 +411,22 @@ Exit criteria:
 - membership status changes affect posting and management behavior immediately
 - role-based rules are explicit enough to support later LLM simulation scenarios
 
+### Future capability: Polls and structured votes
+
+Do not implement this in the current slice, but keep it on the roadmap as an optional conversation capability.
+
+Scope for later:
+
+- allow an authorized member type to post a poll into a conversation
+- allow eligible members to cast one vote per poll
+- expose poll creation and voting as capabilities that can be enabled or disabled by scenario
+- support game-style private votes and WhatsApp-style group polls without coupling either flow to the base message model
+
+Why later:
+
+- pause/resume and message-window controls are the smaller prerequisite for round-based games
+- the first useful vote system should be capability-driven rather than hardcoded to one scenario
+
 ### Step 3: Tests before wider UI work
 
 Goal:
