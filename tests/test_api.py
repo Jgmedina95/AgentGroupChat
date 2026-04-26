@@ -43,10 +43,16 @@ def create_member(
     display_name: str,
     runtime_type: str = "human",
     member_type: str = "user_regular",
+    capabilities: dict | None = None,
 ) -> dict:
     response = client.post(
         "/api/members",
-        json={"display_name": display_name, "type": runtime_type, "member_type": member_type},
+        json={
+            "display_name": display_name,
+            "type": runtime_type,
+            "member_type": member_type,
+            "capabilities": capabilities,
+        },
     )
     assert response.status_code == 201
     return response.json()
@@ -361,3 +367,74 @@ def test_non_admin_cannot_pause_group_messages(client: TestClient) -> None:
         },
     )
     assert pause_response.status_code == 403
+
+
+def test_member_capabilities_gate_actions_but_allow_read_access(client: TestClient) -> None:
+    owner = create_member(client, "owner", runtime_type="human", member_type="user_premium")
+    restricted_member = create_member(
+        client,
+        "restricted-member",
+        runtime_type="llm",
+        member_type="user_regular",
+        capabilities={
+            "send_messages": False,
+            "create_group_conversations": False,
+            "leave_conversations": False,
+        },
+    )
+
+    group_response = client.post(
+        "/api/conversations/group",
+        json={
+            "created_by_member_id": owner["id"],
+            "title": "capability-room",
+            "member_ids": [restricted_member["id"]],
+        },
+    )
+    assert group_response.status_code == 201
+    group = group_response.json()
+
+    seeded_message = client.post(
+        "/api/messages",
+        json={
+            "conversation_id": group["id"],
+            "sender_id": owner["id"],
+            "content": "Read this before you decide.",
+        },
+    )
+    assert seeded_message.status_code == 201
+
+    access_response = client.get(f"/api/members/{restricted_member['id']}/access")
+    assert access_response.status_code == 200
+    access = access_response.json()
+    assert access["member"]["id"] == restricted_member["id"]
+    assert access["capabilities"]["send_messages"] is False
+    assert access["capabilities"]["create_group_conversations"] is False
+    assert access["capabilities"]["leave_conversations"] is False
+    assert access["visible_conversation_ids"] == [group["id"]]
+
+    visible_conversations = client.get(f"/api/members/{restricted_member['id']}/conversations")
+    assert visible_conversations.status_code == 200
+    assert [conversation["id"] for conversation in visible_conversations.json()] == [group["id"]]
+
+    visible_messages = client.get(f"/api/members/{restricted_member['id']}/conversations/{group['id']}/messages")
+    assert visible_messages.status_code == 200
+    assert [message["content"] for message in visible_messages.json()] == ["Read this before you decide."]
+
+    blocked_send = client.post(
+        f"/api/members/{restricted_member['id']}/messages",
+        json={"conversation_id": group["id"], "content": "I should not be allowed to send this."},
+    )
+    assert blocked_send.status_code == 403
+    assert blocked_send.json()["detail"] == "Member cannot send messages"
+
+    blocked_group_create = client.post(
+        f"/api/members/{restricted_member['id']}/conversations/group",
+        json={"title": "blocked-group", "member_ids": []},
+    )
+    assert blocked_group_create.status_code == 403
+    assert blocked_group_create.json()["detail"] == "Member cannot create group conversations"
+
+    blocked_leave = client.post(f"/api/members/{restricted_member['id']}/conversations/{group['id']}/leave")
+    assert blocked_leave.status_code == 403
+    assert blocked_leave.json()["detail"] == "Member cannot leave conversations"

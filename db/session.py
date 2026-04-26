@@ -5,6 +5,10 @@ import sqlite3
 from collections.abc import Generator
 from pathlib import Path
 
+from app_env import load_environment
+
+
+load_environment()
 
 DEFAULT_MEMORY_DATABASE_URL = "file:agent_group_chat?mode=memory&cache=shared"
 DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_MEMORY_DATABASE_URL)
@@ -90,6 +94,8 @@ def _ensure_members_schema(connection: sqlite3.Connection) -> None:
 	columns = _table_columns(connection, "members")
 	if "member_type" not in columns:
 		connection.execute("ALTER TABLE members ADD COLUMN member_type TEXT NOT NULL DEFAULT 'user_regular'")
+	if "capabilities" not in columns:
+		connection.execute("ALTER TABLE members ADD COLUMN capabilities TEXT")
 
 
 def _ensure_memberships_schema(connection: sqlite3.Connection) -> None:
@@ -120,8 +126,8 @@ def _backfill_members_from_agents(connection: sqlite3.Connection) -> None:
 
 	connection.execute(
 		"""
-		INSERT INTO members (id, type, member_type, display_name, config)
-		SELECT agents.id, agents.type, 'user_regular', agents.display_name, agents.config
+		INSERT INTO members (id, type, member_type, display_name, capabilities, config)
+		SELECT agents.id, agents.type, 'user_regular', agents.display_name, NULL, agents.config
 		FROM agents
 		LEFT JOIN members ON members.id = agents.id
 		WHERE members.id IS NULL
@@ -217,6 +223,7 @@ def init_db(database_path: str | Path | None = None) -> None:
 				type TEXT NOT NULL,
 				member_type TEXT NOT NULL DEFAULT 'user_regular',
 				display_name TEXT NOT NULL,
+				capabilities TEXT,
 				config TEXT
 			);
 

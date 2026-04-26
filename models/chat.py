@@ -11,6 +11,7 @@ class Member:
     type: str = ""
     member_type: str = "user_regular"
     display_name: str = ""
+    capabilities: dict | None = None
     config: dict | None = None
 
 

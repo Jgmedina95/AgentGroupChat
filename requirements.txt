@@ -4,3 +4,4 @@ httpx
 textual
 websockets
 pytest
+python-dotenv

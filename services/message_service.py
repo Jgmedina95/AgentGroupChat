@@ -14,6 +14,28 @@ GROUP_CREATOR_MEMBER_TYPES = {"user_premium", "admin"}
 GROUP_MANAGER_MEMBER_TYPES = {"user_premium", "admin"}
 ADMIN_MEMBER_TYPE = "admin"
 VALID_MEMBER_TYPES = {DEFAULT_MEMBER_TYPE, "user_premium", ADMIN_MEMBER_TYPE}
+BASE_MEMBER_CAPABILITIES = {
+    "read_conversations": True,
+    "send_messages": True,
+    "create_direct_conversations": True,
+    "create_group_conversations": False,
+    "leave_conversations": True,
+    "manage_memberships": False,
+    "pause_group_messages": False,
+}
+MEMBER_TYPE_CAPABILITY_OVERRIDES = {
+    DEFAULT_MEMBER_TYPE: {},
+    "user_premium": {
+        "create_group_conversations": True,
+        "manage_memberships": True,
+    },
+    ADMIN_MEMBER_TYPE: {
+        "create_group_conversations": True,
+        "manage_memberships": True,
+        "pause_group_messages": True,
+    },
+}
+VALID_CAPABILITY_KEYS = set(BASE_MEMBER_CAPABILITIES)
 
 
 def _utc_now() -> datetime:
@@ -36,14 +58,45 @@ def _parse_datetime(value: str | None) -> datetime | None:
 
 def _row_to_member(row: sqlite3.Row) -> Member:
     config = json.loads(row["config"]) if row["config"] else None
+    capabilities = json.loads(row["capabilities"]) if "capabilities" in row.keys() and row["capabilities"] else None
     keys = set(row.keys())
     return Member(
         id=row["id"],
         type=row["type"],
         member_type=row["member_type"] if "member_type" in keys else DEFAULT_MEMBER_TYPE,
         display_name=row["display_name"],
+        capabilities=capabilities,
         config=config,
     )
+
+
+def _normalize_capability_overrides(capabilities: dict | None) -> dict[str, bool] | None:
+    if capabilities is None:
+        return None
+
+    normalized: dict[str, bool] = {}
+    invalid_keys = [key for key in capabilities if key not in VALID_CAPABILITY_KEYS]
+    if invalid_keys:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"message": "Invalid capability overrides", "invalid_capabilities": sorted(invalid_keys)},
+        )
+
+    for key, value in capabilities.items():
+        if not isinstance(value, bool):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Capability '{key}' must be a boolean",
+            )
+        normalized[key] = value
+    return normalized
+
+
+def get_effective_member_capabilities(member: Member) -> dict[str, bool]:
+    capabilities = dict(BASE_MEMBER_CAPABILITIES)
+    capabilities.update(MEMBER_TYPE_CAPABILITY_OVERRIDES.get(member.member_type, {}))
+    capabilities.update(_normalize_capability_overrides(member.capabilities) or {})
+    return capabilities
 
 
 def _row_to_membership(row: sqlite3.Row) -> Membership:
@@ -85,7 +138,7 @@ def _load_memberships(db: sqlite3.Connection, conversation_id: str) -> list[Memb
 
 def _get_member(db: sqlite3.Connection, member_id: str) -> Member | None:
     row = db.execute(
-        "SELECT id, type, member_type, display_name, config FROM members WHERE id = ?",
+        "SELECT id, type, member_type, display_name, capabilities, config FROM members WHERE id = ?",
         (member_id,),
     ).fetchone()
     if row is None:
@@ -93,22 +146,51 @@ def _get_member(db: sqlite3.Connection, member_id: str) -> Member | None:
     return _row_to_member(row)
 
 
-def _require_group_creation_permission(db: sqlite3.Connection, created_by_member_id: str) -> Member:
-    member = _get_member(db, created_by_member_id)
+def _require_member_capability(
+    db: sqlite3.Connection,
+    member_id: str,
+    capability_key: str,
+    detail: str,
+    *,
+    missing_detail: str = "Member not found",
+) -> Member:
+    member = _get_member(db, member_id)
     if member is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found")
-    if member.member_type not in GROUP_CREATOR_MEMBER_TYPES:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=missing_detail)
+    if not get_effective_member_capabilities(member).get(capability_key, False):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+    return member
+
+
+def _require_group_creation_permission(db: sqlite3.Connection, created_by_member_id: str) -> Member:
+    member = _require_member_capability(
+        db,
+        created_by_member_id,
+        "create_group_conversations",
+        "Member cannot create group conversations",
+    )
+    if member.member_type not in GROUP_CREATOR_MEMBER_TYPES and not (member.capabilities or {}).get("create_group_conversations"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Member cannot create group conversations")
     return member
 
 
+def _require_direct_conversation_permission(db: sqlite3.Connection, created_by_member_id: str) -> Member:
+    return _require_member_capability(
+        db,
+        created_by_member_id,
+        "create_direct_conversations",
+        "Member cannot create direct conversations",
+    )
+
+
 def _require_admin_member(db: sqlite3.Connection, acting_member_id: str) -> Member:
-    member = _get_member(db, acting_member_id)
-    if member is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Acting member not found")
-    if member.member_type != ADMIN_MEMBER_TYPE:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admins can control message windows")
-    return member
+    return _require_member_capability(
+        db,
+        acting_member_id,
+        "pause_group_messages",
+        "Member cannot control message windows",
+        missing_detail="Acting member not found",
+    )
 
 
 def _get_membership(db: sqlite3.Connection, conversation_id: str, member_id: str) -> Membership | None:
@@ -138,13 +220,17 @@ def _require_group_conversation(db: sqlite3.Connection, conversation_id: str) ->
 
 
 def _require_management_membership(db: sqlite3.Connection, conversation_id: str, acting_member_id: str) -> Membership:
-    acting_member = _get_member(db, acting_member_id)
-    if acting_member is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Acting member not found")
+    acting_member = _require_member_capability(
+        db,
+        acting_member_id,
+        "manage_memberships",
+        "Acting member cannot manage memberships in this conversation",
+        missing_detail="Acting member not found",
+    )
     if acting_member.member_type == ADMIN_MEMBER_TYPE:
         membership = _get_membership(db, conversation_id, acting_member_id)
         return membership or Membership(conversation_id=conversation_id, member_id=acting_member_id, status="active", role="owner")
-    if acting_member.member_type not in GROUP_MANAGER_MEMBER_TYPES:
+    if acting_member.member_type not in GROUP_MANAGER_MEMBER_TYPES and not get_effective_member_capabilities(acting_member)["manage_memberships"]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Acting member cannot manage memberships in this conversation",
@@ -161,17 +247,7 @@ def _require_management_membership(db: sqlite3.Connection, conversation_id: str,
     return membership
 
 
-def _load_conversation(db: sqlite3.Connection, conversation_id: str) -> Conversation | None:
-    row = db.execute(
-        """
-        SELECT id, type, title, created_by_member_id, join_policy, status, messages_paused, message_pause_notice
-        FROM conversations
-        WHERE id = ?
-        """,
-        (conversation_id,),
-    ).fetchone()
-    if row is None:
-        return None
+def _row_to_conversation(db: sqlite3.Connection, row: sqlite3.Row) -> Conversation:
     return Conversation(
         id=row["id"],
         type=row["type"],
@@ -183,24 +259,65 @@ def _load_conversation(db: sqlite3.Connection, conversation_id: str) -> Conversa
         message_pause_notice=row["message_pause_notice"],
         memberships=_load_memberships(db, row["id"]),
     )
+
+
+def _load_conversation(db: sqlite3.Connection, conversation_id: str) -> Conversation | None:
+    row = db.execute(
+        """
+        SELECT id, type, title, created_by_member_id, join_policy, status, messages_paused, message_pause_notice
+        FROM conversations
+        WHERE id = ?
+        """,
+        (conversation_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return _row_to_conversation(db, row)
+
+
+def _list_member_visible_conversations(db: sqlite3.Connection, member_id: str) -> list[Conversation]:
+    rows = db.execute(
+        """
+        SELECT DISTINCT conversations.id, conversations.type, conversations.title, conversations.created_by_member_id,
+               conversations.join_policy, conversations.status, conversations.messages_paused, conversations.message_pause_notice
+        FROM conversations
+        JOIN memberships ON memberships.conversation_id = conversations.id
+        WHERE memberships.member_id = ? AND memberships.status = 'active'
+        ORDER BY conversations.title ASC, conversations.id ASC
+        """,
+        (member_id,),
+    ).fetchall()
+    return [_row_to_conversation(db, row) for row in rows]
+
+
 def create_member(
     db: sqlite3.Connection,
     runtime_type: str,
     display_name: str,
     config: dict | None = None,
     member_type: str = DEFAULT_MEMBER_TYPE,
+    capabilities: dict | None = None,
 ) -> Member:
     if member_type not in VALID_MEMBER_TYPES:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid member_type")
 
-    member = Member(type=runtime_type, member_type=member_type, display_name=display_name, config=config)
+    normalized_capabilities = _normalize_capability_overrides(capabilities)
+
+    member = Member(
+        type=runtime_type,
+        member_type=member_type,
+        display_name=display_name,
+        capabilities=normalized_capabilities,
+        config=config,
+    )
     db.execute(
-        "INSERT INTO members (id, type, member_type, display_name, config) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO members (id, type, member_type, display_name, capabilities, config) VALUES (?, ?, ?, ?, ?, ?)",
         (
             member.id,
             member.type,
             member.member_type,
             member.display_name,
+            json.dumps(member.capabilities) if member.capabilities is not None else None,
             json.dumps(member.config) if member.config is not None else None,
         ),
     )
@@ -214,6 +331,7 @@ def create_agent(
     display_name: str,
     config: dict | None = None,
     member_type: str = DEFAULT_MEMBER_TYPE,
+    capabilities: dict | None = None,
 ) -> Member:
     return create_member(
         db,
@@ -221,12 +339,13 @@ def create_agent(
         display_name=display_name,
         config=config,
         member_type=member_type,
+        capabilities=capabilities,
     )
 
 
 def list_members(db: sqlite3.Connection) -> list[Member]:
     rows = db.execute(
-        "SELECT id, type, member_type, display_name, config FROM members ORDER BY display_name ASC, id ASC"
+        "SELECT id, type, member_type, display_name, capabilities, config FROM members ORDER BY display_name ASC, id ASC"
     ).fetchall()
     return [_row_to_member(row) for row in rows]
 
@@ -246,6 +365,11 @@ def create_conversation(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="At least one participant is required")
 
     requested_ids = list(dict.fromkeys(participant_ids))
+    if conversation_type == "group":
+        _require_group_creation_permission(db, requested_ids[0])
+    elif conversation_type == "direct":
+        _require_direct_conversation_permission(db, requested_ids[0])
+
     placeholders = ", ".join("?" for _ in requested_ids)
     rows = db.execute(
         f"SELECT id FROM members WHERE id IN ({placeholders})",
@@ -258,9 +382,6 @@ def create_conversation(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"message": "Some participants were not found", "missing_agent_ids": missing_ids},
         )
-
-    if conversation_type == "group":
-        _require_group_creation_permission(db, requested_ids[0])
 
     created_at = _utc_now()
     conversation = Conversation(
@@ -341,20 +462,7 @@ def list_conversations(db: sqlite3.Connection) -> list[Conversation]:
         ORDER BY title ASC, id ASC
         """
     ).fetchall()
-    return [
-        Conversation(
-            id=row["id"],
-            type=row["type"],
-            title=row["title"],
-            created_by_member_id=row["created_by_member_id"],
-            join_policy=row["join_policy"],
-            status=row["status"],
-            messages_paused=bool(row["messages_paused"]),
-            message_pause_notice=row["message_pause_notice"],
-            memberships=_load_memberships(db, row["id"]),
-        )
-        for row in rows
-    ]
+    return [_row_to_conversation(db, row) for row in rows]
 
 
 def list_conversation_members(db: sqlite3.Connection, conversation_id: str) -> list[Membership]:
@@ -471,6 +579,7 @@ def remove_member_from_conversation(
 
 
 def leave_conversation(db: sqlite3.Connection, conversation_id: str, member_id: str) -> Membership:
+    _require_member_capability(db, member_id, "leave_conversations", "Member cannot leave conversations")
     conversation = _require_group_conversation(db, conversation_id)
     membership = _get_membership(db, conversation_id, member_id)
     if membership is None or membership.status != "active":
@@ -536,14 +645,13 @@ def create_message(db: sqlite3.Connection, conversation_id: str, sender_id: str,
     if conversation.status != "active":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Conversation is not active")
 
-    sender_exists = db.execute(
-        "SELECT 1 FROM members WHERE id = ?",
-        (sender_id,),
-    ).fetchone()
-    if sender_exists is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sender not found")
-
-    sender = _get_member(db, sender_id)
+    sender = _require_member_capability(
+        db,
+        sender_id,
+        "send_messages",
+        "Member cannot send messages",
+        missing_detail="Sender not found",
+    )
     if conversation.messages_paused and (sender is None or sender.member_type != ADMIN_MEMBER_TYPE):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -602,6 +710,53 @@ def list_messages(db: sqlite3.Connection, conversation_id: str, include_deleted:
             (conversation_id,),
         ).fetchall()
     return [_row_to_message(row) for row in rows]
+
+
+def get_member_access_context(db: sqlite3.Connection, member_id: str) -> tuple[Member, dict[str, bool], list[Conversation]]:
+    member = _get_member(db, member_id)
+    if member is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found")
+    capabilities = get_effective_member_capabilities(member)
+    visible_conversations = _list_member_visible_conversations(db, member_id) if capabilities["read_conversations"] else []
+    return member, capabilities, visible_conversations
+
+
+def list_member_visible_conversations(db: sqlite3.Connection, member_id: str) -> list[Conversation]:
+    _require_member_capability(db, member_id, "read_conversations", "Member cannot read conversations")
+    return _list_member_visible_conversations(db, member_id)
+
+
+def list_member_visible_messages(
+    db: sqlite3.Connection,
+    member_id: str,
+    conversation_id: str,
+    include_deleted: bool = False,
+) -> list[Message]:
+    _require_member_capability(db, member_id, "read_conversations", "Member cannot read conversations")
+    membership = _get_membership(db, conversation_id, member_id)
+    if membership is None or membership.status != "active":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Member cannot read this conversation")
+    return list_messages(db, conversation_id=conversation_id, include_deleted=include_deleted)
+
+
+def create_member_message(db: sqlite3.Connection, member_id: str, conversation_id: str, content: str) -> Message:
+    _require_member_capability(db, member_id, "send_messages", "Member cannot send messages")
+    return create_message(db, conversation_id=conversation_id, sender_id=member_id, content=content)
+
+
+def create_member_group_conversation(
+    db: sqlite3.Connection,
+    member_id: str,
+    title: str | None = None,
+    member_ids: list[str] | None = None,
+) -> Conversation:
+    _require_member_capability(db, member_id, "create_group_conversations", "Member cannot create group conversations")
+    return create_group_conversation(db, created_by_member_id=member_id, title=title, member_ids=member_ids)
+
+
+def leave_member_conversation(db: sqlite3.Connection, member_id: str, conversation_id: str) -> Membership:
+    _require_member_capability(db, member_id, "leave_conversations", "Member cannot leave conversations")
+    return leave_conversation(db, conversation_id=conversation_id, member_id=member_id)
 
 
 def delete_message(db: sqlite3.Connection, message_id: str) -> Message:

@@ -339,6 +339,10 @@ You may need some of these later, but today they would slow down the more import
 - start publishing internal chat events
 - implement first runtime against the gateway
 
+Concrete target for this milestone:
+
+- run a full social-deduction scenario like `Impostor` through the chat substrate, with one admin member, four player members, one shared group chat, private admin-to-player chats, round-based turn control, hidden word assignment, readiness handling, pause and resume controls, and private vote collection
+
 ### Milestone 5: Product expansion
 
 - member-initiated chats
@@ -426,6 +430,45 @@ Why later:
 
 - pause/resume and message-window controls are the smaller prerequisite for round-based games
 - the first useful vote system should be capability-driven rather than hardcoded to one scenario
+
+## Target scenario: Impostor
+
+This is the first concrete simulation the platform should be able to run end to end.
+
+Desired flow:
+
+1. Create five members: four players and one admin.
+2. Admin creates one group chat with all players and one private direct conversation with each player.
+3. Admin posts the game rules in the group chat and waits for each player to send `Ready`.
+4. Once all players are ready, admin pauses group-chat posting.
+5. Admin privately assigns hidden words so that three players share one word and one player gets a different word.
+6. Admin resumes group-chat posting and controls turn order so each player posts one related clue.
+7. After all clues are posted, admin collects votes privately from each player.
+8. Admin announces the vote results in the group chat.
+9. If the impostor is eliminated, end the game. Otherwise continue into the next round until the configured win condition is reached.
+
+What the chat platform already supports for this:
+
+- members with capability overrides
+- admin-controlled pause and resume for group messages
+- group and direct conversations
+- private and shared message history retrieval
+- member-scoped actions and visibility APIs
+
+What is still missing before this becomes a real simulation run instead of manual orchestration:
+
+- a scenario state model for rounds, readiness, alive or eliminated players, hidden assignments, and win conditions
+- a simulation engine that decides when each member should act and calls the chat API or gateway
+- member decision policies for waiting, responding, clue generation, and voting
+- a structured voting flow, whether implemented as private direct-message collection or later as poll primitives
+- admin orchestration helpers for detecting readiness completion, assigning turn order, and advancing rounds
+
+Recommended next slice for this target:
+
+- define a `simulation/engine.py` contract around a chat gateway
+- model one `ImpostorGameState` object outside the chat core
+- implement a minimal admin orchestrator that uses existing chat endpoints to run one round
+- keep voting in direct conversations first, without adding poll infrastructure yet
 
 ### Step 3: Tests before wider UI work
 

@@ -4,8 +4,11 @@ import os
 
 import httpx
 
+from app_env import load_environment
 from tui.state.store import AgentRecord, ConversationRecord, MessageRecord
 
+
+load_environment()
 
 DEFAULT_API_BASE_URL = os.getenv("AGENT_CHAT_API_BASE_URL", "http://localhost:8000/api")
 

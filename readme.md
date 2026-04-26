@@ -1,8 +1,6 @@
 # AgentGroupChat
 
-AgentGroupChat is a chat harness for LLMs and other agents. The long-term goal is to simulate groups of participants with different tools, private and public channels, distinct incentives, and different access to context, then observe how those constraints affect coordination, persuasion, trust, and profit-seeking behavior.
-
-The project is intended to grow into a reusable environment for running scenario-driven agent simulations, not just a simple chat clone.
+AgentGroupChat is a chat substrate for multi-member simulations. The backend owns the stable chat contract, the TUI is an admin or observer client, and the simulation layer drives members through the same API surface a real client would use.
 
 ## Domain glossary
 
@@ -44,24 +42,23 @@ Requirements:
 Non-Functional Requirements:
 - Messages are stored in-memory of each "Device" for 6 hrs.
 
-## Current status
+## What Exists Today
 
-The project currently includes a runnable backend and local tooling foundation:
+The repository currently includes:
 
-- SQLite-backed persistence for members, conversations, memberships, and messages.
-- Conversation membership tracking for participant-aware chats.
-- Ordered message retrieval per conversation.
-- Soft-delete support for messages.
-- Real-time websocket updates for messages and conversation create/delete events.
-- A Textual terminal UI for browsing conversations and message streams.
-- Admin scripts for resetting data and simulating example chat flows.
+- a FastAPI chat app with sqlite-backed members, conversations, memberships, and messages
+- member capability policy and member-scoped action routes
+- websocket updates for conversation and message changes
+- a Textual TUI for browsing conversations and watching live updates
+- a runnable simulation engine for one Impostor round
+- LLM-backed player runtimes with Prime Intellect and OpenAI provider support
 
-What is not built yet:
+What is still incomplete:
 
-- real LLM runtime orchestration
-- per-agent tool and context isolation
-- scenario engines for markets, research teams, or game-theory experiments
-- metrics, replay tooling, and evaluation harnesses
+- multi-round scenario state
+- reusable scenario framework beyond the first Impostor flow
+- richer TUI controls for moderation and simulation launch
+- replay, evaluation, and metrics tooling
 
 ## Roadmap
 
@@ -80,7 +77,7 @@ Allow agents to have different tool access, memory policies, budgets, objectives
 5. Evaluation and replay.
 Add metrics, run summaries, reproducibility controls, and scenario comparison workflows.
 
-## Current architecture
+## Current Architecture
 
 ```mermaid
 flowchart LR
@@ -90,8 +87,8 @@ flowchart LR
 	API[FastAPI API]
 	WS[WebSocket Channels]
 	DB[(SQLite today / PostgreSQL later)]
-	Runtime[Future Agent Runtime Layer]
-	Scenarios[Future Scenario Engine]
+	Runtime[Simulation Runtime Layer]
+	Scenarios[Scenario Engine]
 
 	Browser --> WS
 	TUI --> API
@@ -104,18 +101,14 @@ flowchart LR
 	Scenarios --> API
 ```
 
-Current reality:
+## Documentation
 
-- FastAPI owns the REST and websocket surface.
-- SQLite is the active local persistence layer.
-- The Textual TUI and browser viewer act as clients of the API.
-- Seed and reset scripts can use the API path so the UI gets live updates.
+Subsystem docs live under `docs/`:
 
-Planned evolution:
-
-- replace or supplement SQLite with PostgreSQL for larger runs
-- add agent runtimes with different tools, memory, and context budgets
-- add scenario policies and reward logic on top of the chat substrate
+- `docs/chat-app.md`: backend architecture, routes, service rules, and realtime model
+- `docs/simulation-engine.md`: gateway, runtime model, provider selection, and CLI usage
+- `docs/tui.md`: Textual app structure, state flow, and websocket behavior
+- `docs/impostor-simulation.md`: how the current Impostor scenario maps onto existing chat capabilities
 
 ## Run locally
 
@@ -133,7 +126,7 @@ Planned evolution:
 
 The current test suite is intentionally small and focused on the main API flow: create agents, create conversations, send messages, receive websocket events, and delete conversations.
 
-## Available endpoints
+## Key Endpoints
 
 - `POST /api/members`
 - `GET /api/members`
@@ -142,6 +135,18 @@ The current test suite is intentionally small and focused on the main API flow: 
 - `POST /api/conversations`
 - `GET /api/conversations`
 - `DELETE /api/conversations/{conversation_id}`
+- `GET /api/members/{member_id}/access`
+- `GET /api/members/{member_id}/conversations`
+- `GET /api/members/{member_id}/conversations/{conversation_id}/messages`
+- `POST /api/members/{member_id}/messages`
+- `POST /api/members/{member_id}/conversations/group`
+- `POST /api/members/{member_id}/conversations/{conversation_id}/leave`
+- `POST /api/conversations/group`
+- `GET /api/conversations/{conversation_id}/members`
+- `POST /api/conversations/{conversation_id}/members`
+- `DELETE /api/conversations/{conversation_id}/members/{member_id}`
+- `POST /api/conversations/{conversation_id}/pause-messages`
+- `POST /api/conversations/{conversation_id}/resume-messages`
 - `POST /api/messages`
 - `GET /api/conversations/{conversation_id}/messages`
 - `DELETE /api/messages/{message_id}`
@@ -201,9 +206,31 @@ Example payload:
 }
 ```
 
-## Terminal UI
+## Simulation Engine
 
-The project also includes a Textual-based terminal dashboard for browsing conversations, reading message history, and watching live websocket updates.
+The repository now includes a runnable scenario engine for one Impostor round.
+
+Run it against the live server with:
+
+```bash
+.venv/bin/python -m simulation.engine --api-base-url http://127.0.0.1:8000
+```
+
+The simulation can use:
+
+- rule-based players
+- Prime Intellect LLM players
+- OpenAI-compatible LLM players
+
+Prime Intellect is preferred automatically when `PRIME_API_KEY` is configured.
+
+Relevant environment variables can live in `.env`:
+
+- `PRIME_API_KEY`
+- `PRIME_TEAM_ID` or `AGENT_CHAT_PRIME_TEAM_ID`
+- `AGENT_CHAT_PRIME_MODEL`
+- `OPENAI_API_KEY`
+- `AGENT_CHAT_LLM_PROVIDER`
 
 Install dependencies and launch it with:
 
@@ -226,7 +253,19 @@ Controls:
 - `r` refreshes agents and conversations
 - `q` quits the TUI
 
-## Admin scripts
+## Terminal UI
+
+The TUI remains the admin and observer client for the chat API.
+
+Run it with:
+
+```bash
+.venv/bin/python -m tui
+```
+
+See `docs/tui.md` for the current structure and limitations.
+
+## Admin Scripts
 
 Two helper scripts are available for local resets and demo data:
 
@@ -275,17 +314,11 @@ For a smaller direct chat seed between agent1 and agent2:
 .venv/bin/python scripts/seed_agent1_agent2_private_chat.py --mode api
 ```
 
-## TUI live updates
+## Tests
 
-The TUI uses both websocket updates and periodic background sync. The sync interval defaults to `0.5` seconds and can be changed with:
+Run the full API and simulation suite with:
 
 ```bash
-AGENT_CHAT_TUI_SYNC_INTERVAL=1.0 .venv/bin/python -m tui
+.venv/bin/python -m pytest tests/test_api.py tests/test_simulation.py
 ```
-
-Conversation list changes now also push over `ws://localhost:8000/ws/conversations`, so newly created conversations appear in the TUI sidebar immediately when they are created through the API.
-
-## Next day
-
-Day 2 should focus on conversation membership and message validation rules so the API can enforce who is allowed to participate in each chat.
 

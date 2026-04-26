@@ -13,14 +13,21 @@ from services.message_service import (
 	add_member_to_conversation,
 	create_agent,
 	create_conversation,
+	create_member_group_conversation,
+	create_member_message,
 	create_group_conversation,
 	create_message,
 	delete_conversation,
 	delete_message,
+	get_effective_member_capabilities,
+	get_member_access_context,
 	leave_conversation,
+	leave_member_conversation,
 	list_agents,
 	list_conversation_members,
 	list_conversations,
+	list_member_visible_conversations,
+	list_member_visible_messages,
 	list_messages,
 	pause_conversation_messages,
 	resume_conversation_messages,
@@ -35,6 +42,7 @@ class AgentCreate(BaseModel):
 	type: str
 	member_type: str = "user_regular"
 	display_name: str
+	capabilities: dict[str, bool] | None = None
 	config: dict | None = None
 
 
@@ -74,6 +82,16 @@ class ConversationResumeControl(BaseModel):
 	acting_member_id: str
 
 
+class MemberMessageCreate(BaseModel):
+	conversation_id: str
+	content: str
+
+
+class MemberGroupConversationCreate(BaseModel):
+	title: str | None = None
+	member_ids: list[str] = []
+
+
 class AgentRead(BaseModel):
 	model_config = ConfigDict(from_attributes=True)
 
@@ -81,6 +99,7 @@ class AgentRead(BaseModel):
 	type: str
 	member_type: str
 	display_name: str
+	capabilities: dict[str, bool]
 	config: dict | None
 
 
@@ -119,12 +138,19 @@ class MembershipRead(BaseModel):
 	left_at: datetime | None
 
 
+class MemberAccessRead(BaseModel):
+	member: AgentRead
+	capabilities: dict[str, bool]
+	visible_conversation_ids: list[str]
+
+
 def serialize_member(member: Member) -> AgentRead:
 	return AgentRead(
 		id=member.id,
 		type=member.type,
 		member_type=member.member_type,
 		display_name=member.display_name,
+		capabilities=get_effective_member_capabilities(member),
 		config=member.config,
 	)
 
@@ -175,6 +201,42 @@ def list_members_route(db: sqlite3.Connection = Depends(get_db)) -> list[AgentRe
 	return [serialize_member(member) for member in list_agents(db)]
 
 
+@router.get("/members/{member_id}/access", response_model=MemberAccessRead)
+def get_member_access_route(member_id: str, db: sqlite3.Connection = Depends(get_db)) -> MemberAccessRead:
+	member, capabilities, visible_conversations = get_member_access_context(db, member_id)
+	return MemberAccessRead(
+		member=serialize_member(member),
+		capabilities=capabilities,
+		visible_conversation_ids=[conversation.id for conversation in visible_conversations],
+	)
+
+
+@router.get("/members/{member_id}/conversations", response_model=list[ConversationRead])
+def list_member_conversations_route(
+	member_id: str,
+	db: sqlite3.Connection = Depends(get_db),
+) -> list[ConversationRead]:
+	return [serialize_conversation(conversation) for conversation in list_member_visible_conversations(db, member_id)]
+
+
+@router.get("/members/{member_id}/conversations/{conversation_id}/messages", response_model=list[MessageRead])
+def list_member_messages_route(
+	member_id: str,
+	conversation_id: str,
+	include_deleted: bool = False,
+	db: sqlite3.Connection = Depends(get_db),
+) -> list[MessageRead]:
+	return [
+		serialize_message(message)
+		for message in list_member_visible_messages(
+			db,
+			member_id=member_id,
+			conversation_id=conversation_id,
+			include_deleted=include_deleted,
+		)
+	]
+
+
 @router.get("/conversations", response_model=list[ConversationRead])
 def list_conversations_route(db: sqlite3.Connection = Depends(get_db)) -> list[ConversationRead]:
 	return [serialize_conversation(conversation) for conversation in list_conversations(db)]
@@ -187,6 +249,7 @@ def create_agent_route(payload: AgentCreate, db: sqlite3.Connection = Depends(ge
 			db,
 			agent_type=payload.type,
 			display_name=payload.display_name,
+			capabilities=payload.capabilities,
 			config=payload.config,
 			member_type=payload.member_type,
 		)
@@ -200,10 +263,31 @@ def create_member_route(payload: AgentCreate, db: sqlite3.Connection = Depends(g
 			db,
 			agent_type=payload.type,
 			display_name=payload.display_name,
+			capabilities=payload.capabilities,
 			config=payload.config,
 			member_type=payload.member_type,
 		)
 	)
+
+
+@router.post("/members/{member_id}/conversations/group", response_model=ConversationRead, status_code=status.HTTP_201_CREATED)
+async def create_member_group_conversation_route(
+	member_id: str,
+	payload: MemberGroupConversationCreate,
+	db: sqlite3.Connection = Depends(get_db),
+) -> ConversationRead:
+	conversation = create_member_group_conversation(
+		db,
+		member_id=member_id,
+		title=payload.title,
+		member_ids=payload.member_ids,
+	)
+	conversation_read = serialize_conversation(conversation)
+	await conversation_list_manager.broadcast(
+		"__all_conversations__",
+		{"event": "conversation.created", "data": conversation_read.model_dump(mode="json")},
+	)
+	return conversation_read
 
 
 @router.post("/conversations/group", response_model=ConversationRead, status_code=status.HTTP_201_CREATED)
@@ -305,6 +389,21 @@ async def leave_conversation_route(
 	return membership_read
 
 
+@router.post("/members/{member_id}/conversations/{conversation_id}/leave", response_model=MembershipRead)
+async def leave_member_conversation_route(
+	member_id: str,
+	conversation_id: str,
+	db: sqlite3.Connection = Depends(get_db),
+) -> MembershipRead:
+	membership = leave_member_conversation(db, member_id=member_id, conversation_id=conversation_id)
+	membership_read = serialize_membership(membership)
+	await manager.broadcast(
+		conversation_id,
+		{"event": "membership.left", "data": membership_read.model_dump(mode="json")},
+	)
+	return membership_read
+
+
 @router.post("/conversations/{conversation_id}/pause-messages", response_model=ConversationRead)
 async def pause_conversation_messages_route(
 	conversation_id: str,
@@ -367,6 +466,26 @@ async def create_message_route(payload: MessageCreate, db: sqlite3.Connection = 
 		db,
 		conversation_id=payload.conversation_id,
 		sender_id=payload.sender_id,
+		content=payload.content,
+	)
+	message_read = serialize_message(message)
+	await manager.broadcast(
+		payload.conversation_id,
+		{"event": "message.created", "data": message_read.model_dump(mode="json")},
+	)
+	return message_read
+
+
+@router.post("/members/{member_id}/messages", response_model=MessageRead, status_code=status.HTTP_201_CREATED)
+async def create_member_message_route(
+	member_id: str,
+	payload: MemberMessageCreate,
+	db: sqlite3.Connection = Depends(get_db),
+) -> MessageRead:
+	message = create_member_message(
+		db,
+		member_id=member_id,
+		conversation_id=payload.conversation_id,
 		content=payload.content,
 	)
 	message_read = serialize_message(message)
