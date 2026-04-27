@@ -225,6 +225,12 @@ Run the friends trip planner against the live server with:
 
 By default, the trip planner now behaves like a live conversation: it keeps going until the group reaches consensus, someone in the group sends the exact stop command, or the discussion stalls with no new messages. Use `--auto-finish` if you still want the host to conclude the run automatically instead of waiting for a stop message.
 
+You can also drive the trip planner from a declarative JSON scenario spec instead of composing all settings through CLI flags:
+
+```bash
+.venv/bin/python -m simulation.trip_planner --api-base-url http://127.0.0.1:8000 --spec-file path/to/trip-spec.json
+```
+
 The simulation can use:
 
 ## Python Facade

@@ -172,12 +172,53 @@ Run the friends trip planner against the live server:
 
 The trip planner uses live LLM-backed friends by default and pauses between actions so the TUI can follow the conversation. Use `--no-delay` when you want the scenario to complete immediately.
 
+The trip planner can now also run from a declarative JSON scenario spec through `FriendsTripScenarioSpec` and `--spec-file`. This keeps persona setup, pacing, and termination rules in structured data instead of hard-coded config assembly.
+
 Important trip planner flags:
 
+- `--spec-file` to load a JSON scenario spec instead of building the trip planner from individual CLI flags
 - `--stop-command` to change the exact message that ends a live run
 - `--auto-finish` to let the host conclude the run automatically when the discussion stalls instead of waiting for an explicit stop message
 - `--discussion-seed` for reproducible turn-taking
 - `--max-rounds` is now a legacy compatibility option and no longer bounds the outcome directly
+
+Minimal example spec shape:
+
+```json
+{
+  "admin_name": "Planner",
+  "group_title": "Weekend Escape",
+  "destination_options": ["Lisbon", "Montreal"],
+  "friends": [
+    {
+      "name": "Nina",
+      "traits": ["empathetic"],
+      "budget_notes": "Needs a reasonable plan.",
+      "travel_hopes": "Wants time together.",
+      "worries": "Does not want anyone left out."
+    }
+  ],
+  "initiator_name": "Nina",
+  "kickoff_message": "Can we find a plan we both like?",
+  "pacing": {
+    "discussion_seed": 7,
+    "action_delay_seconds": 0.0,
+    "llm_provider": "openai"
+  },
+  "termination": {
+    "stop_command": "stop",
+    "continue_until_stopped": false,
+    "host_decision_timeout_minutes": 5.0,
+    "max_discussion_rounds": 3
+  }
+}
+```
+
+Run it with:
+
+```bash
+.venv/bin/python -m simulation.trip_planner --api-base-url http://127.0.0.1:8000 --spec-file path/to/trip-spec.json
+```
 
 Force rule-based players:
 

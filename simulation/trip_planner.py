@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import random
 import time
 from dataclasses import dataclass, field
@@ -62,6 +63,174 @@ def default_friend_personas() -> list[TripFriendPersona]:
 			hard_constraints=["Needs a destination with straightforward flights and accommodation options"],
 		),
 	]
+
+
+@dataclass(slots=True)
+class FriendsTripFriendSpec:
+	name: str
+	traits: list[str]
+	budget_notes: str
+	travel_hopes: str
+	worries: str
+	hard_constraints: list[str] = field(default_factory=list)
+
+	def to_persona(self) -> TripFriendPersona:
+		return TripFriendPersona(
+			name=self.name,
+			traits=list(self.traits),
+			budget_notes=self.budget_notes,
+			travel_hopes=self.travel_hopes,
+			worries=self.worries,
+			hard_constraints=list(self.hard_constraints),
+		)
+
+	@classmethod
+	def from_persona(cls, persona: TripFriendPersona) -> FriendsTripFriendSpec:
+		return cls(
+			name=persona.name,
+			traits=list(persona.traits),
+			budget_notes=persona.budget_notes,
+			travel_hopes=persona.travel_hopes,
+			worries=persona.worries,
+			hard_constraints=list(persona.hard_constraints),
+		)
+
+	@classmethod
+	def from_dict(cls, payload: dict[str, Any]) -> FriendsTripFriendSpec:
+		return cls(
+			name=str(payload["name"]),
+			traits=[str(trait) for trait in payload.get("traits", [])],
+			budget_notes=str(payload["budget_notes"]),
+			travel_hopes=str(payload["travel_hopes"]),
+			worries=str(payload["worries"]),
+			hard_constraints=[str(constraint) for constraint in payload.get("hard_constraints", [])],
+		)
+
+	def to_dict(self) -> dict[str, Any]:
+		return {
+			"name": self.name,
+			"traits": list(self.traits),
+			"budget_notes": self.budget_notes,
+			"travel_hopes": self.travel_hopes,
+			"worries": self.worries,
+			"hard_constraints": list(self.hard_constraints),
+		}
+
+
+def default_friend_specs() -> list[FriendsTripFriendSpec]:
+	return [FriendsTripFriendSpec.from_persona(persona) for persona in default_friend_personas()]
+
+
+@dataclass(slots=True)
+class FriendsTripPacingSpec:
+	discussion_seed: int | None = None
+	action_delay_seconds: float = 0.0
+	llm_provider: str | None = None
+
+	@classmethod
+	def from_dict(cls, payload: dict[str, Any] | None) -> FriendsTripPacingSpec:
+		if payload is None:
+			return cls()
+		return cls(
+			discussion_seed=payload.get("discussion_seed"),
+			action_delay_seconds=float(payload.get("action_delay_seconds", 0.0)),
+			llm_provider=payload.get("llm_provider"),
+		)
+
+	def to_dict(self) -> dict[str, Any]:
+		return {
+			"discussion_seed": self.discussion_seed,
+			"action_delay_seconds": self.action_delay_seconds,
+			"llm_provider": self.llm_provider,
+		}
+
+
+@dataclass(slots=True)
+class FriendsTripTerminationSpec:
+	stop_command: str | None = DEFAULT_STOP_COMMAND
+	continue_until_stopped: bool = False
+	host_decision_timeout_minutes: float = 5.0
+	max_discussion_rounds: int = 3
+
+	@classmethod
+	def from_dict(cls, payload: dict[str, Any] | None) -> FriendsTripTerminationSpec:
+		if payload is None:
+			return cls()
+		return cls(
+			stop_command=payload.get("stop_command", DEFAULT_STOP_COMMAND),
+			continue_until_stopped=bool(payload.get("continue_until_stopped", False)),
+			host_decision_timeout_minutes=float(payload.get("host_decision_timeout_minutes", 5.0)),
+			max_discussion_rounds=int(payload.get("max_discussion_rounds", 3)),
+		)
+
+	def to_dict(self) -> dict[str, Any]:
+		return {
+			"stop_command": self.stop_command,
+			"continue_until_stopped": self.continue_until_stopped,
+			"host_decision_timeout_minutes": self.host_decision_timeout_minutes,
+			"max_discussion_rounds": self.max_discussion_rounds,
+		}
+
+
+@dataclass(slots=True)
+class FriendsTripScenarioSpec:
+	admin_name: str = "Trip Host"
+	group_title: str = DEFAULT_TRIP_GROUP_TITLE
+	destination_options: list[str] = field(default_factory=lambda: list(DEFAULT_DESTINATION_OPTIONS))
+	friends: list[FriendsTripFriendSpec] = field(default_factory=default_friend_specs)
+	initiator_name: str = "Nina"
+	kickoff_message: str = "Hey everyone, can we finally plan a friends trip and see if there is somewhere we can all actually agree on?"
+	pacing: FriendsTripPacingSpec = field(default_factory=FriendsTripPacingSpec)
+	termination: FriendsTripTerminationSpec = field(default_factory=FriendsTripTerminationSpec)
+
+	def to_config(self) -> FriendsTripConfig:
+		return FriendsTripConfig(
+			admin_name=self.admin_name,
+			group_title=self.group_title,
+			destination_options=list(self.destination_options),
+			friends=[friend.to_persona() for friend in self.friends],
+			initiator_name=self.initiator_name,
+			kickoff_message=self.kickoff_message,
+			max_discussion_rounds=self.termination.max_discussion_rounds,
+			host_decision_timeout_minutes=self.termination.host_decision_timeout_minutes,
+			discussion_seed=self.pacing.discussion_seed,
+			stop_command=self.termination.stop_command,
+			continue_until_stopped=self.termination.continue_until_stopped,
+			llm_provider=self.pacing.llm_provider,
+			action_delay_seconds=self.pacing.action_delay_seconds,
+		)
+
+	@classmethod
+	def from_dict(cls, payload: dict[str, Any]) -> FriendsTripScenarioSpec:
+		return cls(
+			admin_name=str(payload.get("admin_name", "Trip Host")),
+			group_title=str(payload.get("group_title", DEFAULT_TRIP_GROUP_TITLE)),
+			destination_options=[str(option) for option in payload.get("destination_options", DEFAULT_DESTINATION_OPTIONS)],
+			friends=[FriendsTripFriendSpec.from_dict(friend) for friend in payload.get("friends", [friend.to_dict() for friend in default_friend_specs()])],
+			initiator_name=str(payload.get("initiator_name", "Nina")),
+			kickoff_message=str(payload.get("kickoff_message", "Hey everyone, can we finally plan a friends trip and see if there is somewhere we can all actually agree on?")),
+			pacing=FriendsTripPacingSpec.from_dict(payload.get("pacing")),
+			termination=FriendsTripTerminationSpec.from_dict(payload.get("termination")),
+		)
+
+	@classmethod
+	def from_json_file(cls, path: str | Path) -> FriendsTripScenarioSpec:
+		payload = json.loads(Path(path).read_text(encoding="utf-8"))
+		if not isinstance(payload, dict):
+			raise ValueError("Friends trip scenario spec file must contain a JSON object")
+		return cls.from_dict(payload)
+
+	def to_dict(self) -> dict[str, Any]:
+		return {
+			"admin_name": self.admin_name,
+			"group_title": self.group_title,
+			"destination_options": list(self.destination_options),
+			"friends": [friend.to_dict() for friend in self.friends],
+			"initiator_name": self.initiator_name,
+			"kickoff_message": self.kickoff_message,
+			"pacing": self.pacing.to_dict(),
+			"termination": self.termination.to_dict(),
+		}
 
 
 @dataclass(slots=True)
@@ -521,6 +690,9 @@ class FriendsTripSimulationEngine:
 		self._owned_runtime_factory.close()
 		self._owned_runtime_factory = None
 
+	def run_spec(self, spec: FriendsTripScenarioSpec) -> FriendsTripSimulationResult:
+		return self.run(spec.to_config())
+
 	def _build_runtimes(
 		self,
 		config: FriendsTripConfig,
@@ -656,6 +828,7 @@ def build_http_trip_engine(
 def parse_args() -> argparse.Namespace:
 	parser = argparse.ArgumentParser(description="Run a live friends trip-planning simulation through the chat API.")
 	parser.add_argument("--api-base-url", default=DEFAULT_API_BASE_URL, help="Base URL of the running FastAPI app.")
+	parser.add_argument("--spec-file", help="Optional JSON scenario spec file for the trip planner.")
 	parser.add_argument("--admin-name", default="Trip Host")
 	parser.add_argument("--group-title", default=DEFAULT_TRIP_GROUP_TITLE)
 	parser.add_argument("--initiator", default="Nina", help="Friend who starts the trip-planning chat.")
@@ -686,20 +859,23 @@ def main() -> None:
 	engine = FriendsTripSimulationEngine(gateway)
 	try:
 		try:
-			result = engine.run(
-				FriendsTripConfig(
-					admin_name=args.admin_name,
-					group_title=args.group_title,
-					initiator_name=args.initiator,
-					destination_options=list(args.destinations),
-					max_discussion_rounds=args.max_rounds,
-					discussion_seed=args.discussion_seed,
-					stop_command=args.stop_command,
-					continue_until_stopped=not args.auto_finish,
-					llm_provider=args.llm_provider,
-					action_delay_seconds=0.0 if args.no_delay else args.delay,
+			if args.spec_file:
+				result = engine.run_spec(FriendsTripScenarioSpec.from_json_file(args.spec_file))
+			else:
+				result = engine.run(
+					FriendsTripConfig(
+						admin_name=args.admin_name,
+						group_title=args.group_title,
+						initiator_name=args.initiator,
+						destination_options=list(args.destinations),
+						max_discussion_rounds=args.max_rounds,
+						discussion_seed=args.discussion_seed,
+						stop_command=args.stop_command,
+						continue_until_stopped=not args.auto_finish,
+						llm_provider=args.llm_provider,
+						action_delay_seconds=0.0 if args.no_delay else args.delay,
+					)
 				)
-			)
 		except RuntimeError as exc:
 			raise SystemExit(str(exc)) from exc
 		print(f"Created admin: {result.admin_member['display_name']} ({result.admin_member['id']})")

@@ -9,7 +9,15 @@ import api.websockets as websocket_module
 from db.session import create_connection, get_db, init_db
 from main import app
 from simulation.runtimes.trip_planner import ScriptedTripDecisionClient, TripFriendPersona, TripPlannerRuntimeFactory
-from simulation.trip_planner import FriendsTripConfig, FriendsTripSimulationEngine, FriendsTripSimulationState
+from simulation.trip_planner import (
+	FriendsTripConfig,
+	FriendsTripFriendSpec,
+	FriendsTripPacingSpec,
+	FriendsTripScenarioSpec,
+	FriendsTripSimulationEngine,
+	FriendsTripSimulationState,
+	FriendsTripTerminationSpec,
+)
 from chatapp.gateway import TestClientChatGateway
 
 
@@ -90,6 +98,117 @@ def test_trip_planner_state_tracks_round_progress_and_stop() -> None:
 	assert snapshot["preferences_by_round"] == [{"Nina": "Lisbon", "Marco": "Lisbon"}]
 	assert snapshot["active_round"] is None
 	assert snapshot["trace_events"][0]["event_type"] == "turn_offered"
+
+
+def test_trip_planner_scenario_spec_builds_config() -> None:
+	spec = FriendsTripScenarioSpec(
+		admin_name="Planner",
+		group_title="Weekend Escape",
+		destination_options=["Lisbon", "Montreal"],
+		friends=[
+			FriendsTripFriendSpec(
+				name="Nina",
+				traits=["empathetic"],
+				budget_notes="Needs a reasonable plan.",
+				travel_hopes="Wants time together.",
+				worries="Does not want anyone left out.",
+			),
+		],
+		initiator_name="Nina",
+		kickoff_message="Should we plan something simple?",
+		pacing=FriendsTripPacingSpec(discussion_seed=7, action_delay_seconds=0.0, llm_provider="openai"),
+		termination=FriendsTripTerminationSpec(stop_command="done", continue_until_stopped=True, host_decision_timeout_minutes=3.0, max_discussion_rounds=9),
+	)
+
+	config = spec.to_config()
+
+	assert config.admin_name == "Planner"
+	assert config.group_title == "Weekend Escape"
+	assert config.destination_options == ["Lisbon", "Montreal"]
+	assert len(config.friends) == 1
+	assert config.friends[0].name == "Nina"
+	assert config.initiator_name == "Nina"
+	assert config.kickoff_message == "Should we plan something simple?"
+	assert config.discussion_seed == 7
+	assert config.action_delay_seconds == 0.0
+	assert config.llm_provider == "openai"
+	assert config.stop_command == "done"
+	assert config.continue_until_stopped is True
+	assert config.host_decision_timeout_minutes == 3.0
+	assert config.max_discussion_rounds == 9
+
+
+def test_trip_planner_can_run_from_scenario_spec(tmp_path: Path) -> None:
+	database_path = tmp_path / "trip-planner-spec.db"
+	init_db(database_path)
+
+	def testing_session_local() -> sqlite3.Connection:
+		return create_connection(database_path)
+
+	def override_get_db():
+		db = testing_session_local()
+		try:
+			yield db
+		finally:
+			db.close()
+
+	app.dependency_overrides[get_db] = override_get_db
+	original_session_local = websocket_module.SessionLocal
+	websocket_module.SessionLocal = testing_session_local
+
+	try:
+		with TestClient(app) as client:
+			decision_client = ScriptedTripDecisionClient(
+				message_responses={
+					"Nina": ["Lisbon still feels realistic for everyone."],
+					"Marco": ["Lisbon works for me if we stay on budget."],
+				},
+				choice_responses={
+					"Nina": ["Lisbon"],
+					"Marco": ["Lisbon"],
+				},
+			)
+			engine = FriendsTripSimulationEngine(
+				TestClientChatGateway(client),
+				runtime_factory=TripPlannerRuntimeFactory(decision_client),
+			)
+			spec = FriendsTripScenarioSpec.from_dict(
+				{
+					"admin_name": "Planner",
+					"group_title": "Weekend Escape",
+					"destination_options": ["Lisbon", "Montreal"],
+					"friends": [
+						{
+							"name": "Nina",
+							"traits": ["empathetic"],
+							"budget_notes": "Needs a reasonable plan.",
+							"travel_hopes": "Wants time together.",
+							"worries": "Does not want anyone left out.",
+						},
+						{
+							"name": "Marco",
+							"traits": ["budget-conscious"],
+							"budget_notes": "Needs to keep costs down.",
+							"travel_hopes": "Would enjoy a walkable city.",
+							"worries": "Does not want surprise costs.",
+						},
+					],
+					"initiator_name": "Nina",
+					"kickoff_message": "Can we find a plan we both like?",
+					"pacing": {"discussion_seed": 4, "action_delay_seconds": 0.0},
+					"termination": {"continue_until_stopped": False, "stop_command": "stop"},
+				}
+			)
+
+			result = engine.run_spec(spec)
+
+			assert result.consensus_reached is True
+			assert result.final_choice == "Lisbon"
+			assert result.group_conversation["title"] == "Weekend Escape"
+			assert [friend["display_name"] for friend in result.friends] == ["Nina", "Marco"]
+	finally:
+		app.dependency_overrides.clear()
+		websocket_module.SessionLocal = original_session_local
 
 
 def test_trip_planner_reaches_destination_consensus(tmp_path: Path) -> None:
