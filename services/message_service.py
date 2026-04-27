@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from fastapi import HTTPException, status
 
-from models import Conversation, Member, Membership, Message
+from models import Conversation, Member, Membership, Message, SimulationTraceEventRecord, SimulationTraceRun
 
 
 DEFAULT_MEMBER_TYPE = "user_regular"
@@ -120,6 +120,49 @@ def _row_to_message(row: sqlite3.Row) -> Message:
         content=row["content"],
         created_at=_parse_datetime(row["created_at"]) or _utc_now(),
         deleted_at=_parse_datetime(row["deleted_at"]),
+    )
+
+
+def _row_to_simulation_trace_event(row: sqlite3.Row) -> SimulationTraceEventRecord:
+    return SimulationTraceEventRecord(
+        id=row["id"],
+        trace_run_id=row["trace_run_id"],
+        sequence_index=row["sequence_index"],
+        event_type=row["event_type"],
+        recorded_at=_parse_datetime(row["recorded_at"]) or _utc_now(),
+        round_index=row["round_index"],
+        member_id=row["member_id"],
+        member_name=row["member_name"],
+        conversation_id=row["conversation_id"],
+        details=json.loads(row["details"]) if row["details"] else {},
+    )
+
+
+def _load_simulation_trace_events(db: sqlite3.Connection, trace_run_id: str) -> list[SimulationTraceEventRecord]:
+    rows = db.execute(
+        """
+        SELECT id, trace_run_id, sequence_index, event_type, recorded_at, round_index,
+               member_id, member_name, conversation_id, details
+        FROM simulation_trace_events
+        WHERE trace_run_id = ?
+        ORDER BY sequence_index ASC
+        """,
+        (trace_run_id,),
+    ).fetchall()
+    return [_row_to_simulation_trace_event(row) for row in rows]
+
+
+def _row_to_simulation_trace_run(db: sqlite3.Connection, row: sqlite3.Row) -> SimulationTraceRun:
+    return SimulationTraceRun(
+        id=row["id"],
+        scenario_type=row["scenario_type"],
+        root_conversation_id=row["root_conversation_id"],
+        created_at=_parse_datetime(row["created_at"]) or _utc_now(),
+        final_choice=row["final_choice"],
+        consensus_reached=bool(row["consensus_reached"]),
+        stopped_early=bool(row["stopped_early"]),
+        stop_requested_by_member_id=row["stop_requested_by_member_id"],
+        events=_load_simulation_trace_events(db, row["id"]),
     )
 
 
@@ -710,6 +753,129 @@ def list_messages(db: sqlite3.Connection, conversation_id: str, include_deleted:
             (conversation_id,),
         ).fetchall()
     return [_row_to_message(row) for row in rows]
+
+
+def create_simulation_trace_run(
+    db: sqlite3.Connection,
+    *,
+    scenario_type: str,
+    root_conversation_id: str,
+    final_choice: str | None,
+    consensus_reached: bool,
+    stopped_early: bool,
+    stop_requested_by_member_id: str | None,
+    events: list[dict],
+) -> SimulationTraceRun:
+    conversation = _load_conversation(db, root_conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+    if stop_requested_by_member_id is not None and _get_member(db, stop_requested_by_member_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Stop-requesting member not found")
+
+    trace_run = SimulationTraceRun(
+        scenario_type=scenario_type,
+        root_conversation_id=root_conversation_id,
+        final_choice=final_choice,
+        consensus_reached=consensus_reached,
+        stopped_early=stopped_early,
+        stop_requested_by_member_id=stop_requested_by_member_id,
+    )
+    db.execute(
+        """
+        INSERT INTO simulation_trace_runs (
+            id, scenario_type, root_conversation_id, created_at, final_choice,
+            consensus_reached, stopped_early, stop_requested_by_member_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            trace_run.id,
+            trace_run.scenario_type,
+            trace_run.root_conversation_id,
+            _serialize_datetime(trace_run.created_at),
+            trace_run.final_choice,
+            1 if trace_run.consensus_reached else 0,
+            1 if trace_run.stopped_early else 0,
+            trace_run.stop_requested_by_member_id,
+        ),
+    )
+
+    stored_events: list[SimulationTraceEventRecord] = []
+    for sequence_index, event_payload in enumerate(events):
+        recorded_at = _parse_datetime(event_payload.get("recorded_at")) or _utc_now()
+        member_id = event_payload.get("member_id")
+        if member_id is not None and _get_member(db, member_id) is None:
+            member_id = None
+        conversation_id = event_payload.get("conversation_id")
+        if conversation_id is not None and _load_conversation(db, conversation_id) is None:
+            conversation_id = None
+        event = SimulationTraceEventRecord(
+            trace_run_id=trace_run.id,
+            sequence_index=sequence_index,
+            event_type=event_payload["event_type"],
+            recorded_at=recorded_at,
+            round_index=event_payload.get("round_index"),
+            member_id=member_id,
+            member_name=event_payload.get("member_name"),
+            conversation_id=conversation_id,
+            details=event_payload.get("details") or {},
+        )
+        db.execute(
+            """
+            INSERT INTO simulation_trace_events (
+                id, trace_run_id, sequence_index, event_type, recorded_at, round_index,
+                member_id, member_name, conversation_id, details
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event.id,
+                event.trace_run_id,
+                event.sequence_index,
+                event.event_type,
+                _serialize_datetime(event.recorded_at),
+                event.round_index,
+                event.member_id,
+                event.member_name,
+                event.conversation_id,
+                json.dumps(event.details),
+            ),
+        )
+        stored_events.append(event)
+
+    db.commit()
+    trace_run.events = stored_events
+    return trace_run
+
+
+def list_conversation_simulation_trace_runs(db: sqlite3.Connection, conversation_id: str) -> list[SimulationTraceRun]:
+    conversation = _load_conversation(db, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+    rows = db.execute(
+        """
+        SELECT id, scenario_type, root_conversation_id, created_at, final_choice,
+               consensus_reached, stopped_early, stop_requested_by_member_id
+        FROM simulation_trace_runs
+        WHERE root_conversation_id = ?
+        ORDER BY created_at DESC, id DESC
+        """,
+        (conversation_id,),
+    ).fetchall()
+    return [_row_to_simulation_trace_run(db, row) for row in rows]
+
+
+def get_simulation_trace_run(db: sqlite3.Connection, trace_run_id: str) -> SimulationTraceRun:
+    row = db.execute(
+        """
+        SELECT id, scenario_type, root_conversation_id, created_at, final_choice,
+               consensus_reached, stopped_early, stop_requested_by_member_id
+        FROM simulation_trace_runs
+        WHERE id = ?
+        """,
+        (trace_run_id,),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Simulation trace run not found")
+    return _row_to_simulation_trace_run(db, row)
 
 
 def get_member_access_context(db: sqlite3.Connection, member_id: str) -> tuple[Member, dict[str, bool], list[Conversation]]:

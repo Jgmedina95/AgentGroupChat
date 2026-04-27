@@ -369,6 +369,65 @@ def test_non_admin_cannot_pause_group_messages(client: TestClient) -> None:
     assert pause_response.status_code == 403
 
 
+def test_simulation_trace_runs_can_be_created_and_listed(client: TestClient) -> None:
+    admin = create_member(client, "trace-admin", runtime_type="human", member_type="admin")
+    friend = create_member(client, "trace-friend", runtime_type="llm", member_type="user_regular")
+    conversation_response = client.post(
+        f"/api/members/{admin['id']}/conversations/group",
+        json={"title": "trace-group", "member_ids": [friend["id"]]},
+    )
+    assert conversation_response.status_code == 201
+    conversation_id = conversation_response.json()["id"]
+
+    create_response = client.post(
+        "/api/simulation-traces",
+        json={
+            "scenario_type": "trip_planner",
+            "root_conversation_id": conversation_id,
+            "final_choice": "Lisbon",
+            "consensus_reached": True,
+            "stopped_early": False,
+            "stop_requested_by_member_id": None,
+            "events": [
+                {
+                    "event_type": "group_chat_created",
+                    "member_id": admin["id"],
+                    "member_name": admin["display_name"],
+                    "conversation_id": conversation_id,
+                    "details": {"title": "trace-group"},
+                },
+                {
+                    "event_type": "message_posted",
+                    "member_id": friend["id"],
+                    "member_name": friend["display_name"],
+                    "conversation_id": conversation_id,
+                    "details": {"content": "hello", "message_scope": "group"},
+                },
+            ],
+        },
+    )
+    assert create_response.status_code == 201
+    trace_run = create_response.json()
+    assert trace_run["scenario_type"] == "trip_planner"
+    assert len(trace_run["events"]) == 2
+    assert trace_run["events"][1]["member_id"] == friend["id"]
+
+    list_response = client.get(f"/api/conversations/{conversation_id}/simulation-traces")
+    assert list_response.status_code == 200
+    trace_runs = list_response.json()
+    assert len(trace_runs) == 1
+    assert trace_runs[0]["id"] == trace_run["id"]
+
+    get_response = client.get(f"/api/simulation-traces/{trace_run['id']}")
+    assert get_response.status_code == 200
+    loaded_trace_run = get_response.json()
+    assert loaded_trace_run["root_conversation_id"] == conversation_id
+    assert [event["event_type"] for event in loaded_trace_run["events"]] == [
+        "group_chat_created",
+        "message_posted",
+    ]
+
+
 def test_member_capabilities_gate_actions_but_allow_read_access(client: TestClient) -> None:
     owner = create_member(client, "owner", runtime_type="human", member_type="user_premium")
     restricted_member = create_member(

@@ -128,6 +128,42 @@ class RestChatGateway:
 		response.raise_for_status()
 		return response.json()
 
+	def create_simulation_trace_run(
+		self,
+		*,
+		scenario_type: str,
+		root_conversation_id: str,
+		final_choice: str | None,
+		consensus_reached: bool,
+		stopped_early: bool,
+		stop_requested_by_member_id: str | None,
+		events: list[dict[str, Any]],
+	) -> dict[str, Any]:
+		response = self._client.post(
+			"/api/simulation-traces",
+			json={
+				"scenario_type": scenario_type,
+				"root_conversation_id": root_conversation_id,
+				"final_choice": final_choice,
+				"consensus_reached": consensus_reached,
+				"stopped_early": stopped_early,
+				"stop_requested_by_member_id": stop_requested_by_member_id,
+				"events": events,
+			},
+		)
+		response.raise_for_status()
+		return response.json()
+
+	def list_conversation_simulation_trace_runs(self, conversation_id: str) -> list[dict[str, Any]]:
+		response = self._client.get(f"/api/conversations/{conversation_id}/simulation-traces")
+		response.raise_for_status()
+		return response.json()
+
+	def get_simulation_trace_run(self, trace_run_id: str) -> dict[str, Any]:
+		response = self._client.get(f"/api/simulation-traces/{trace_run_id}")
+		response.raise_for_status()
+		return response.json()
+
 	def close(self) -> None:
 		return None
 

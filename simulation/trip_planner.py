@@ -4,12 +4,21 @@ import argparse
 import random
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import chatapp
 from chatapp.gateway import DEFAULT_API_BASE_URL, HttpChatGateway, RestChatGateway
 from chatapp.options import read_messages, send_messages
 
+from simulation.core.policies import (
+	FirstMatchTerminationPolicy,
+	ShuffledTurnPolicy,
+	StopCommandTerminationPolicy,
+	TerminationPolicy,
+	UnanimousPreferenceTerminationPolicy,
+)
+from simulation.core.trace import SimulationTraceEvent, SimulationTraceRecorder, write_trace_log
 from simulation.runtimes.trip_planner import NO_TRIP_CHOICE, TripFriendPersona, TripPlannerRuntimeFactory
 
 
@@ -83,6 +92,7 @@ class FriendsTripSimulationResult:
 	consensus_reached: bool
 	stopped_early: bool = False
 	stop_requested_by_member_id: str | None = None
+	trace_events: list[SimulationTraceEvent] = field(default_factory=list)
 
 
 class FriendsTripSimulationEngine:
@@ -115,37 +125,86 @@ class FriendsTripSimulationEngine:
 			)
 			for persona in config.friends
 		]
+		trace_recorder = SimulationTraceRecorder()
 		friends_by_name = {friend.display_name: friend for friend in friends}
+		member_names_by_id = {admin.id: admin.display_name} | {friend.id: friend.display_name for friend in friends}
+		member_ids_by_name = {member_name: member_id for member_id, member_name in member_names_by_id.items()}
 		group_conversation = server.open_session(title=config.group_title, owner=admin, members=friends)
+		trace_recorder.record(
+			event_type="group_chat_created",
+			member_id=admin.id,
+			member_name=config.admin_name,
+			conversation_id=group_conversation.id,
+			details={
+				"title": config.group_title,
+				"member_names": [friend.display_name for friend in friends],
+			},
+		)
 		self._sleep(config.action_delay_seconds)
 
-		private_conversations = {
-			friend.display_name: admin.start_direct_chat(
+		private_conversations: dict[str, chatapp.ChatConversation] = {}
+		for friend in friends:
+			conversation = admin.start_direct_chat(
 				title=f"{config.admin_name} and {friend.display_name}",
 				members=[friend],
 			)
-			for friend in friends
-		}
+			private_conversations[friend.display_name] = conversation
+			trace_recorder.record(
+				event_type="private_chat_created",
+				member_id=admin.id,
+				member_name=config.admin_name,
+				conversation_id=conversation.id,
+				details={"peer_name": friend.display_name},
+			)
 		self._sleep(config.action_delay_seconds)
 
 		runtimes = self._build_runtimes(config, friends)
 		for persona in config.friends:
-			admin.send_message(private_conversations[persona.name], persona.as_private_brief())
+			private_brief = persona.as_private_brief()
+			admin.send_message(private_conversations[persona.name], private_brief)
+			self._record_message_posted(
+				trace_recorder,
+				round_index=None,
+				member_id=admin.id,
+				member_name=config.admin_name,
+				conversation_id=private_conversations[persona.name].id,
+				content=private_brief,
+				message_scope="private",
+				recipient_name=persona.name,
+			)
 			self._sleep(config.action_delay_seconds)
 
 		friends_by_name[config.initiator_name].send_message(group_conversation, config.kickoff_message)
+		self._record_message_posted(
+			trace_recorder,
+			round_index=None,
+			member_id=member_ids_by_name[config.initiator_name],
+			member_name=config.initiator_name,
+			conversation_id=group_conversation.id,
+			content=config.kickoff_message,
+			message_scope="group",
+		)
 		self._sleep(config.action_delay_seconds)
 
 		preferences_by_round: list[dict[str, str]] = []
 		final_choice = NO_TRIP_CHOICE
 		consensus_reached = False
-		rng = random.Random(config.discussion_seed)
-		stop_requesting_member_id = self._find_stop_requesting_member_id(
+		turn_policy = ShuffledTurnPolicy(random.Random(config.discussion_seed))
+		termination_policy = FirstMatchTerminationPolicy(
+			(
+				StopCommandTerminationPolicy(config.stop_command),
+				UnanimousPreferenceTerminationPolicy(),
+			)
+		)
+		stop_requesting_member_id = self._check_stop_requested(
+			termination_policy=termination_policy,
 			conversation_id=group_conversation.id,
-			stop_command=config.stop_command,
+			trace_recorder=trace_recorder,
+			member_names_by_id=member_names_by_id,
+			round_index=None,
 		)
 		if stop_requesting_member_id is not None:
-			return self._build_result(
+			return self._finalize_result(
 				admin=admin,
 				friends=friends,
 				group_conversation=group_conversation,
@@ -155,6 +214,7 @@ class FriendsTripSimulationEngine:
 				consensus_reached=consensus_reached,
 				stopped_early=True,
 				stop_requested_by_member_id=stop_requesting_member_id,
+				trace_events=trace_recorder.events,
 			)
 
 		round_index = 0
@@ -163,12 +223,15 @@ class FriendsTripSimulationEngine:
 			messages_sent_this_round = 0
 
 			while available_speakers:
-				stop_requesting_member_id = self._find_stop_requesting_member_id(
+				stop_requesting_member_id = self._check_stop_requested(
+					termination_policy=termination_policy,
 					conversation_id=group_conversation.id,
-					stop_command=config.stop_command,
+					trace_recorder=trace_recorder,
+					member_names_by_id=member_names_by_id,
+					round_index=round_index,
 				)
 				if stop_requesting_member_id is not None:
-					return self._build_result(
+					return self._finalize_result(
 						admin=admin,
 						friends=friends,
 						group_conversation=group_conversation,
@@ -178,13 +241,34 @@ class FriendsTripSimulationEngine:
 						consensus_reached=consensus_reached,
 						stopped_early=True,
 						stop_requested_by_member_id=stop_requesting_member_id,
+						trace_events=trace_recorder.events,
 					)
 
-				candidate_names = list(available_speakers)
-				rng.shuffle(candidate_names)
+				candidate_names = turn_policy.order_candidates(available_speakers)
+				trace_recorder.record(
+					event_type="turn_candidates_ordered",
+					round_index=round_index,
+					conversation_id=group_conversation.id,
+					details={
+						"candidate_names": list(candidate_names),
+						"available_speakers": list(available_speakers),
+						"messages_sent_this_round": messages_sent_this_round,
+					},
+				)
 				next_speaker: tuple[str, str] | None = None
 
 				for persona_name in candidate_names:
+					trace_recorder.record(
+						event_type="turn_offered",
+						round_index=round_index,
+						member_id=member_ids_by_name[persona_name],
+						member_name=persona_name,
+						conversation_id=group_conversation.id,
+						details={
+							"messages_sent_this_round": messages_sent_this_round,
+							"available_speakers": list(available_speakers),
+						},
+					)
 					message = runtimes[persona_name].decide_message(
 						group_conversation_id=group_conversation.id,
 						private_conversation_id=private_conversations[persona_name].id,
@@ -194,6 +278,13 @@ class FriendsTripSimulationEngine:
 						messages_sent_this_round=messages_sent_this_round,
 					)
 					if message is None:
+						trace_recorder.record(
+							event_type="turn_skipped",
+							round_index=round_index,
+							member_id=member_ids_by_name[persona_name],
+							member_name=persona_name,
+							conversation_id=group_conversation.id,
+						)
 						continue
 					next_speaker = (persona_name, message)
 					break
@@ -203,15 +294,27 @@ class FriendsTripSimulationEngine:
 
 				speaker_name, message = next_speaker
 				friends_by_name[speaker_name].send_message(group_conversation, message)
+				self._record_message_posted(
+					trace_recorder,
+					round_index=round_index,
+					member_id=member_ids_by_name[speaker_name],
+					member_name=speaker_name,
+					conversation_id=group_conversation.id,
+					content=message,
+					message_scope="group",
+				)
 				available_speakers.remove(speaker_name)
 				messages_sent_this_round += 1
 				self._sleep(config.action_delay_seconds)
-				stop_requesting_member_id = self._find_stop_requesting_member_id(
+				stop_requesting_member_id = self._check_stop_requested(
+					termination_policy=termination_policy,
 					conversation_id=group_conversation.id,
-					stop_command=config.stop_command,
+					trace_recorder=trace_recorder,
+					member_names_by_id=member_names_by_id,
+					round_index=round_index,
 				)
 				if stop_requesting_member_id is not None:
-					return self._build_result(
+					return self._finalize_result(
 						admin=admin,
 						friends=friends,
 						group_conversation=group_conversation,
@@ -221,14 +324,18 @@ class FriendsTripSimulationEngine:
 						consensus_reached=consensus_reached,
 						stopped_early=True,
 						stop_requested_by_member_id=stop_requesting_member_id,
+						trace_events=trace_recorder.events,
 					)
 
-			stop_requesting_member_id = self._find_stop_requesting_member_id(
+			stop_requesting_member_id = self._check_stop_requested(
+				termination_policy=termination_policy,
 				conversation_id=group_conversation.id,
-				stop_command=config.stop_command,
+				trace_recorder=trace_recorder,
+				member_names_by_id=member_names_by_id,
+				round_index=round_index,
 			)
 			if stop_requesting_member_id is not None:
-				return self._build_result(
+				return self._finalize_result(
 					admin=admin,
 					friends=friends,
 					group_conversation=group_conversation,
@@ -238,6 +345,7 @@ class FriendsTripSimulationEngine:
 					consensus_reached=consensus_reached,
 					stopped_early=True,
 					stop_requested_by_member_id=stop_requesting_member_id,
+					trace_events=trace_recorder.events,
 				)
 
 			preferences = {
@@ -249,8 +357,19 @@ class FriendsTripSimulationEngine:
 				for persona in config.friends
 			}
 			preferences_by_round.append(preferences)
-			if len(set(preferences.values())) == 1:
-				final_choice = next(iter(preferences.values()))
+			consensus_decision = termination_policy.evaluate(messages=[], preferences=preferences)
+			trace_recorder.record(
+				event_type="consensus_checked",
+				round_index=round_index,
+				conversation_id=group_conversation.id,
+				details={
+					"preferences": dict(preferences),
+					"consensus_choice": consensus_decision.consensus_choice,
+					"consensus_reached": consensus_decision.consensus_choice is not None,
+				},
+			)
+			if consensus_decision.consensus_choice is not None:
+				final_choice = consensus_decision.consensus_choice
 				consensus_reached = True
 			elif not config.continue_until_stopped:
 				final_choice = NO_TRIP_CHOICE
@@ -260,7 +379,7 @@ class FriendsTripSimulationEngine:
 				break
 
 		if config.continue_until_stopped:
-			return self._build_result(
+			return self._finalize_result(
 				admin=admin,
 				friends=friends,
 				group_conversation=group_conversation,
@@ -268,6 +387,7 @@ class FriendsTripSimulationEngine:
 				preferences_by_round=preferences_by_round,
 				final_choice=final_choice,
 				consensus_reached=consensus_reached,
+				trace_events=trace_recorder.events,
 			)
 
 		if not consensus_reached:
@@ -279,14 +399,33 @@ class FriendsTripSimulationEngine:
 					"so the default outcome is no trip."
 				),
 			)
+			self._record_message_posted(
+				trace_recorder,
+				round_index=None,
+				member_id=admin.id,
+				member_name=config.admin_name,
+				conversation_id=group_conversation.id,
+				content=(
+					f"It has been about {config.host_decision_timeout_minutes:g} minutes and the group still has not fully aligned, "
+					"so the default outcome is no trip."
+				),
+				message_scope="group",
+			)
 			self._sleep(config.action_delay_seconds)
 
-		admin.send_message(
-			group_conversation,
-			self._format_final_message(final_choice, timeout_minutes=config.host_decision_timeout_minutes),
+		final_message = self._format_final_message(final_choice, timeout_minutes=config.host_decision_timeout_minutes)
+		admin.send_message(group_conversation, final_message)
+		self._record_message_posted(
+			trace_recorder,
+			round_index=None,
+			member_id=admin.id,
+			member_name=config.admin_name,
+			conversation_id=group_conversation.id,
+			content=final_message,
+			message_scope="group",
 		)
 
-		return self._build_result(
+		return self._finalize_result(
 			admin=admin,
 			friends=friends,
 			group_conversation=group_conversation,
@@ -294,7 +433,45 @@ class FriendsTripSimulationEngine:
 			preferences_by_round=preferences_by_round,
 			final_choice=final_choice,
 			consensus_reached=consensus_reached,
+			trace_events=trace_recorder.events,
 		)
+
+	def _finalize_result(
+		self,
+		*,
+		admin: chatapp.ChatMember,
+		friends: list[chatapp.ChatMember],
+		group_conversation: chatapp.ChatConversation,
+		private_conversations: dict[str, chatapp.ChatConversation],
+		preferences_by_round: list[dict[str, str]],
+		final_choice: str,
+		consensus_reached: bool,
+		stopped_early: bool = False,
+		stop_requested_by_member_id: str | None = None,
+		trace_events: list[SimulationTraceEvent] | None = None,
+	) -> FriendsTripSimulationResult:
+		result = self._build_result(
+			admin=admin,
+			friends=friends,
+			group_conversation=group_conversation,
+			private_conversations=private_conversations,
+			preferences_by_round=preferences_by_round,
+			final_choice=final_choice,
+			consensus_reached=consensus_reached,
+			stopped_early=stopped_early,
+			stop_requested_by_member_id=stop_requested_by_member_id,
+			trace_events=trace_events,
+		)
+		self._gateway.create_simulation_trace_run(
+			scenario_type="trip_planner",
+			root_conversation_id=result.group_conversation["id"],
+			final_choice=result.final_choice,
+			consensus_reached=result.consensus_reached,
+			stopped_early=result.stopped_early,
+			stop_requested_by_member_id=result.stop_requested_by_member_id,
+			events=[self._serialize_trace_event(event) for event in result.trace_events],
+		)
+		return result
 
 	def close(self) -> None:
 		if self._owned_runtime_factory is None:
@@ -335,6 +512,7 @@ class FriendsTripSimulationEngine:
 		consensus_reached: bool,
 		stopped_early: bool = False,
 		stop_requested_by_member_id: str | None = None,
+		trace_events: list[SimulationTraceEvent] | None = None,
 	) -> FriendsTripSimulationResult:
 		return FriendsTripSimulationResult(
 			admin_member=admin.payload,
@@ -346,23 +524,67 @@ class FriendsTripSimulationEngine:
 			consensus_reached=consensus_reached,
 			stopped_early=stopped_early,
 			stop_requested_by_member_id=stop_requested_by_member_id,
+			trace_events=[] if trace_events is None else list(trace_events),
 		)
 
-	def _find_stop_requesting_member_id(
+	def _check_stop_requested(
 		self,
 		*,
+		termination_policy: TerminationPolicy,
 		conversation_id: str,
-		stop_command: str | None,
+		trace_recorder: SimulationTraceRecorder,
+		member_names_by_id: dict[str, str],
+		round_index: int | None,
 	) -> str | None:
-		if stop_command is None:
-			return None
-		normalized_stop_command = stop_command.strip().casefold()
-		if not normalized_stop_command:
-			return None
-		for message in reversed(self._gateway.list_conversation_messages(conversation_id)):
-			if message["content"].strip().casefold() == normalized_stop_command:
-				return str(message["sender_id"])
-		return None
+		decision = termination_policy.evaluate(
+			messages=self._gateway.list_conversation_messages(conversation_id),
+		)
+		if decision.stop_requested_by_member_id is not None:
+			trace_recorder.record(
+				event_type="stop_requested",
+				round_index=round_index,
+				member_id=decision.stop_requested_by_member_id,
+				member_name=member_names_by_id.get(decision.stop_requested_by_member_id),
+				conversation_id=conversation_id,
+				details={"stop_requested_by_member_id": decision.stop_requested_by_member_id},
+			)
+		return decision.stop_requested_by_member_id
+
+	@staticmethod
+	def _record_message_posted(
+		trace_recorder: SimulationTraceRecorder,
+		*,
+		round_index: int | None,
+		member_id: str,
+		member_name: str,
+		conversation_id: str,
+		content: str,
+		message_scope: str,
+		recipient_name: str | None = None,
+	) -> None:
+		details = {"content": content, "message_scope": message_scope}
+		if recipient_name is not None:
+			details["recipient_name"] = recipient_name
+		trace_recorder.record(
+			event_type="message_posted",
+			round_index=round_index,
+			member_id=member_id,
+			member_name=member_name,
+			conversation_id=conversation_id,
+			details=details,
+		)
+
+	@staticmethod
+	def _serialize_trace_event(event: SimulationTraceEvent) -> dict[str, Any]:
+		return {
+			"event_type": event.event_type,
+			"recorded_at": event.recorded_at.isoformat(),
+			"round_index": event.round_index,
+			"member_id": event.member_id,
+			"member_name": event.member_name,
+			"conversation_id": event.conversation_id,
+			"details": dict(event.details),
+		}
 
 	@staticmethod
 	def _format_final_message(final_choice: str, *, timeout_minutes: float) -> str:
@@ -417,6 +639,7 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--auto-finish", action="store_true", help="Let the host stop the simulation automatically using the round limit and final decision logic.")
 	parser.add_argument("--delay", type=float, default=1.5, help="Seconds to wait between actions so the TUI can follow the conversation.")
 	parser.add_argument("--no-delay", action="store_true", help="Run without pauses between actions.")
+	parser.add_argument("--trace-output", help="Optional path to write a human-readable trace log for the simulation run.")
 	return parser.parse_args()
 
 
@@ -454,6 +677,9 @@ def main() -> None:
 		print(f"Stopped early: {result.stopped_early}")
 		if result.stop_requested_by_member_id is not None:
 			print(f"Stop requested by member: {result.stop_requested_by_member_id}")
+		if args.trace_output:
+			trace_path = write_trace_log(result.trace_events, Path(args.trace_output))
+			print(f"Trace written to: {trace_path}")
 	finally:
 		engine.close()
 		gateway.close()

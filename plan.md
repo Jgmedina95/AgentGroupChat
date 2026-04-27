@@ -1,5 +1,40 @@
 # Refactor Plan
 
+## Current Simulation Architecture Plan
+
+### Direction
+
+Keep the chat substrate as the source of truth and make the simulation side more composable.
+
+This means:
+
+- conversation, membership, visibility, and message posting stay owned by the chat layer
+- simulations remain clients of that chat layer instead of bypassing it
+- orchestration becomes modular through reusable policies rather than being hard-coded per scenario
+
+### Immediate phases
+
+1. Extract orchestration policies from scenarios.
+Start with `TurnPolicy` and `TerminationPolicy` in the trip planner so turn-taking and stop or consensus checks are reusable without changing chat behavior.
+
+2. Add simulation trace events.
+Record decisions such as offered turns, skipped turns, posted messages, consensus checks, and stop triggers so the TUI and future replay tools can inspect why the simulation moved the way it did.
+
+3. Introduce explicit scenario state objects.
+Move mutable scenario data out of engine loops into serializable state structures.
+
+4. Add declarative scenario specs.
+Support scenario configuration for personas, policies, pacing, and termination rules without rewriting orchestration code.
+
+### Step 1 scope
+
+The first implementation step should be intentionally small:
+
+- add reusable policy classes under `simulation/core/`
+- move trip planner turn ordering behind a `TurnPolicy`
+- move stop and consensus checks behind `TerminationPolicy` implementations
+- keep the current trip-planner behavior and tests unchanged
+
 ## Goal
 
 Turn this repository into a reusable chat platform where:

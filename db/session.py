@@ -259,10 +259,38 @@ def init_db(database_path: str | Path | None = None) -> None:
 				deleted_at TEXT
 			);
 
+			CREATE TABLE IF NOT EXISTS simulation_trace_runs (
+				id TEXT PRIMARY KEY,
+				scenario_type TEXT NOT NULL,
+				root_conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+				created_at TEXT NOT NULL,
+				final_choice TEXT,
+				consensus_reached INTEGER NOT NULL DEFAULT 0,
+				stopped_early INTEGER NOT NULL DEFAULT 0,
+				stop_requested_by_member_id TEXT REFERENCES members(id)
+			);
+
+			CREATE TABLE IF NOT EXISTS simulation_trace_events (
+				id TEXT PRIMARY KEY,
+				trace_run_id TEXT NOT NULL REFERENCES simulation_trace_runs(id) ON DELETE CASCADE,
+				sequence_index INTEGER NOT NULL,
+				event_type TEXT NOT NULL,
+				recorded_at TEXT NOT NULL,
+				round_index INTEGER,
+				member_id TEXT REFERENCES members(id),
+				member_name TEXT,
+				conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,
+				details TEXT NOT NULL,
+				UNIQUE(trace_run_id, sequence_index)
+			);
+
 			CREATE INDEX IF NOT EXISTS idx_memberships_conversation_id ON memberships(conversation_id);
 			CREATE INDEX IF NOT EXISTS idx_memberships_member_id ON memberships(member_id);
 			CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id);
 			CREATE INDEX IF NOT EXISTS idx_messages_sender_id ON messages(sender_id);
+			CREATE INDEX IF NOT EXISTS idx_simulation_trace_runs_conversation_id ON simulation_trace_runs(root_conversation_id);
+			CREATE INDEX IF NOT EXISTS idx_simulation_trace_events_trace_run_id ON simulation_trace_events(trace_run_id);
+			CREATE INDEX IF NOT EXISTS idx_simulation_trace_events_conversation_id ON simulation_trace_events(conversation_id);
 			"""
 		)
 		connection.commit()

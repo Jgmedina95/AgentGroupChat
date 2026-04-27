@@ -8,23 +8,26 @@ from pydantic import BaseModel, ConfigDict
 
 from db.session import get_db
 from api.websockets import conversation_list_manager, manager
-from models import Conversation, Member, Message
+from models import Conversation, Member, Message, SimulationTraceEventRecord, SimulationTraceRun
 from services.message_service import (
 	add_member_to_conversation,
 	create_agent,
 	create_conversation,
 	create_member_group_conversation,
 	create_member_message,
+	create_simulation_trace_run,
 	create_group_conversation,
 	create_message,
 	delete_conversation,
 	delete_message,
 	get_effective_member_capabilities,
 	get_member_access_context,
+	get_simulation_trace_run,
 	leave_conversation,
 	leave_member_conversation,
 	list_agents,
 	list_conversation_members,
+	list_conversation_simulation_trace_runs,
 	list_conversations,
 	list_member_visible_conversations,
 	list_member_visible_messages,
@@ -144,6 +147,55 @@ class MemberAccessRead(BaseModel):
 	visible_conversation_ids: list[str]
 
 
+class SimulationTraceEventCreate(BaseModel):
+	event_type: str
+	recorded_at: datetime | None = None
+	round_index: int | None = None
+	member_id: str | None = None
+	member_name: str | None = None
+	conversation_id: str | None = None
+	details: dict | None = None
+
+
+class SimulationTraceRunCreate(BaseModel):
+	scenario_type: str
+	root_conversation_id: str
+	final_choice: str | None = None
+	consensus_reached: bool = False
+	stopped_early: bool = False
+	stop_requested_by_member_id: str | None = None
+	events: list[SimulationTraceEventCreate]
+
+
+class SimulationTraceEventRead(BaseModel):
+	model_config = ConfigDict(from_attributes=True)
+
+	id: str
+	trace_run_id: str
+	sequence_index: int
+	event_type: str
+	recorded_at: datetime
+	round_index: int | None
+	member_id: str | None
+	member_name: str | None
+	conversation_id: str | None
+	details: dict
+
+
+class SimulationTraceRunRead(BaseModel):
+	model_config = ConfigDict(from_attributes=True)
+
+	id: str
+	scenario_type: str
+	root_conversation_id: str
+	created_at: datetime
+	final_choice: str | None
+	consensus_reached: bool
+	stopped_early: bool
+	stop_requested_by_member_id: str | None
+	events: list[SimulationTraceEventRead]
+
+
 def serialize_member(member: Member) -> AgentRead:
 	return AgentRead(
 		id=member.id,
@@ -188,6 +240,35 @@ def serialize_conversation(conversation: Conversation) -> ConversationRead:
 		participant_ids=participant_ids,
 		messages_paused=conversation.messages_paused,
 		message_pause_notice=conversation.message_pause_notice,
+	)
+
+
+def serialize_simulation_trace_event(event: SimulationTraceEventRecord) -> SimulationTraceEventRead:
+	return SimulationTraceEventRead(
+		id=event.id,
+		trace_run_id=event.trace_run_id,
+		sequence_index=event.sequence_index,
+		event_type=event.event_type,
+		recorded_at=event.recorded_at,
+		round_index=event.round_index,
+		member_id=event.member_id,
+		member_name=event.member_name,
+		conversation_id=event.conversation_id,
+		details=event.details,
+	)
+
+
+def serialize_simulation_trace_run(trace_run: SimulationTraceRun) -> SimulationTraceRunRead:
+	return SimulationTraceRunRead(
+		id=trace_run.id,
+		scenario_type=trace_run.scenario_type,
+		root_conversation_id=trace_run.root_conversation_id,
+		created_at=trace_run.created_at,
+		final_choice=trace_run.final_choice,
+		consensus_reached=trace_run.consensus_reached,
+		stopped_early=trace_run.stopped_early,
+		stop_requested_by_member_id=trace_run.stop_requested_by_member_id,
+		events=[serialize_simulation_trace_event(event) for event in trace_run.events],
 	)
 
 
@@ -503,6 +584,43 @@ def list_messages_route(
 	db: sqlite3.Connection = Depends(get_db),
 ) -> list[MessageRead]:
 	return [serialize_message(message) for message in list_messages(db, conversation_id=conversation_id, include_deleted=include_deleted)]
+
+
+@router.post("/simulation-traces", response_model=SimulationTraceRunRead, status_code=status.HTTP_201_CREATED)
+def create_simulation_trace_run_route(
+	payload: SimulationTraceRunCreate,
+	db: sqlite3.Connection = Depends(get_db),
+) -> SimulationTraceRunRead:
+	trace_run = create_simulation_trace_run(
+		db,
+		scenario_type=payload.scenario_type,
+		root_conversation_id=payload.root_conversation_id,
+		final_choice=payload.final_choice,
+		consensus_reached=payload.consensus_reached,
+		stopped_early=payload.stopped_early,
+		stop_requested_by_member_id=payload.stop_requested_by_member_id,
+		events=[event.model_dump(mode="json") for event in payload.events],
+	)
+	return serialize_simulation_trace_run(trace_run)
+
+
+@router.get("/conversations/{conversation_id}/simulation-traces", response_model=list[SimulationTraceRunRead])
+def list_conversation_simulation_traces_route(
+	conversation_id: str,
+	db: sqlite3.Connection = Depends(get_db),
+) -> list[SimulationTraceRunRead]:
+	return [
+		serialize_simulation_trace_run(trace_run)
+		for trace_run in list_conversation_simulation_trace_runs(db, conversation_id)
+	]
+
+
+@router.get("/simulation-traces/{trace_run_id}", response_model=SimulationTraceRunRead)
+def get_simulation_trace_run_route(
+	trace_run_id: str,
+	db: sqlite3.Connection = Depends(get_db),
+) -> SimulationTraceRunRead:
+	return serialize_simulation_trace_run(get_simulation_trace_run(db, trace_run_id))
 
 
 @router.delete("/messages/{message_id}", response_model=MessageRead)

@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import uuid
+from typing import Any
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 @dataclass(slots=True)
@@ -61,3 +66,30 @@ class Conversation:
 
 Agent = Member
 ConversationParticipant = Membership
+
+
+@dataclass(slots=True)
+class SimulationTraceEventRecord:
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    trace_run_id: str = ""
+    sequence_index: int = 0
+    event_type: str = ""
+    recorded_at: datetime = field(default_factory=_utc_now)
+    round_index: int | None = None
+    member_id: str | None = None
+    member_name: str | None = None
+    conversation_id: str | None = None
+    details: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class SimulationTraceRun:
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    scenario_type: str = ""
+    root_conversation_id: str = ""
+    created_at: datetime = field(default_factory=_utc_now)
+    final_choice: str | None = None
+    consensus_reached: bool = False
+    stopped_early: bool = False
+    stop_requested_by_member_id: str | None = None
+    events: list[SimulationTraceEventRecord] = field(default_factory=list)
