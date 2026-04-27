@@ -72,6 +72,7 @@ class FriendsTripConfig:
 	friends: list[TripFriendPersona] = field(default_factory=default_friend_personas)
 	initiator_name: str = "Nina"
 	kickoff_message: str = "Hey everyone, can we finally plan a friends trip and see if there is somewhere we can all actually agree on?"
+	# Kept for backward compatibility, but the simulation is no longer bounded by a fixed round count.
 	max_discussion_rounds: int = 3
 	host_decision_timeout_minutes: float = 5.0
 	discussion_seed: int | None = None
@@ -93,6 +94,87 @@ class FriendsTripSimulationResult:
 	stopped_early: bool = False
 	stop_requested_by_member_id: str | None = None
 	trace_events: list[SimulationTraceEvent] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class FriendsTripRoundState:
+	round_index: int
+	available_speakers: list[str]
+	messages_sent_this_round: int = 0
+
+	def mark_message_sent(self, speaker_name: str) -> None:
+		self.available_speakers.remove(speaker_name)
+		self.messages_sent_this_round += 1
+
+	def to_dict(self) -> dict[str, Any]:
+		return {
+			"round_index": self.round_index,
+			"available_speakers": list(self.available_speakers),
+			"messages_sent_this_round": self.messages_sent_this_round,
+		}
+
+
+@dataclass(slots=True)
+class FriendsTripSimulationState:
+	round_index: int = 0
+	preferences_by_round: list[dict[str, str]] = field(default_factory=list)
+	final_choice: str = NO_TRIP_CHOICE
+	consensus_reached: bool = False
+	stopped_early: bool = False
+	stop_requested_by_member_id: str | None = None
+	trace_recorder: SimulationTraceRecorder = field(default_factory=SimulationTraceRecorder)
+	active_round: FriendsTripRoundState | None = None
+
+	@property
+	def trace_events(self) -> list[SimulationTraceEvent]:
+		return self.trace_recorder.events
+
+	def start_round(self, speaker_names: list[str]) -> FriendsTripRoundState:
+		self.active_round = FriendsTripRoundState(
+			round_index=self.round_index,
+			available_speakers=list(speaker_names),
+		)
+		return self.active_round
+
+	def record_preferences(self, preferences: dict[str, str]) -> None:
+		self.preferences_by_round.append(dict(preferences))
+
+	def apply_consensus(self, consensus_choice: str | None) -> None:
+		if consensus_choice is not None:
+			self.final_choice = consensus_choice
+			self.consensus_reached = True
+
+	def mark_stop_requested(self, member_id: str) -> None:
+		self.stopped_early = True
+		self.stop_requested_by_member_id = member_id
+
+	def advance_round(self) -> None:
+		self.round_index += 1
+		self.active_round = None
+
+	def to_dict(self) -> dict[str, Any]:
+		return {
+			"round_index": self.round_index,
+			"preferences_by_round": [dict(preferences) for preferences in self.preferences_by_round],
+			"final_choice": self.final_choice,
+			"consensus_reached": self.consensus_reached,
+			"stopped_early": self.stopped_early,
+			"stop_requested_by_member_id": self.stop_requested_by_member_id,
+			"active_round": None if self.active_round is None else self.active_round.to_dict(),
+			"trace_events": [self._serialize_trace_event(event) for event in self.trace_events],
+		}
+
+	@staticmethod
+	def _serialize_trace_event(event: SimulationTraceEvent) -> dict[str, Any]:
+		return {
+			"event_type": event.event_type,
+			"recorded_at": event.recorded_at.isoformat(),
+			"round_index": event.round_index,
+			"member_id": event.member_id,
+			"member_name": event.member_name,
+			"conversation_id": event.conversation_id,
+			"details": dict(event.details),
+		}
 
 
 class FriendsTripSimulationEngine:
@@ -125,12 +207,12 @@ class FriendsTripSimulationEngine:
 			)
 			for persona in config.friends
 		]
-		trace_recorder = SimulationTraceRecorder()
+		state = FriendsTripSimulationState()
 		friends_by_name = {friend.display_name: friend for friend in friends}
 		member_names_by_id = {admin.id: admin.display_name} | {friend.id: friend.display_name for friend in friends}
 		member_ids_by_name = {member_name: member_id for member_id, member_name in member_names_by_id.items()}
 		group_conversation = server.open_session(title=config.group_title, owner=admin, members=friends)
-		trace_recorder.record(
+		state.trace_recorder.record(
 			event_type="group_chat_created",
 			member_id=admin.id,
 			member_name=config.admin_name,
@@ -149,7 +231,7 @@ class FriendsTripSimulationEngine:
 				members=[friend],
 			)
 			private_conversations[friend.display_name] = conversation
-			trace_recorder.record(
+			state.trace_recorder.record(
 				event_type="private_chat_created",
 				member_id=admin.id,
 				member_name=config.admin_name,
@@ -163,7 +245,7 @@ class FriendsTripSimulationEngine:
 			private_brief = persona.as_private_brief()
 			admin.send_message(private_conversations[persona.name], private_brief)
 			self._record_message_posted(
-				trace_recorder,
+				state.trace_recorder,
 				round_index=None,
 				member_id=admin.id,
 				member_name=config.admin_name,
@@ -176,7 +258,7 @@ class FriendsTripSimulationEngine:
 
 		friends_by_name[config.initiator_name].send_message(group_conversation, config.kickoff_message)
 		self._record_message_posted(
-			trace_recorder,
+			state.trace_recorder,
 			round_index=None,
 			member_id=member_ids_by_name[config.initiator_name],
 			member_name=config.initiator_name,
@@ -186,9 +268,6 @@ class FriendsTripSimulationEngine:
 		)
 		self._sleep(config.action_delay_seconds)
 
-		preferences_by_round: list[dict[str, str]] = []
-		final_choice = NO_TRIP_CHOICE
-		consensus_reached = False
 		turn_policy = ShuffledTurnPolicy(random.Random(config.discussion_seed))
 		termination_policy = FirstMatchTerminationPolicy(
 			(
@@ -199,88 +278,77 @@ class FriendsTripSimulationEngine:
 		stop_requesting_member_id = self._check_stop_requested(
 			termination_policy=termination_policy,
 			conversation_id=group_conversation.id,
-			trace_recorder=trace_recorder,
+			trace_recorder=state.trace_recorder,
 			member_names_by_id=member_names_by_id,
 			round_index=None,
 		)
 		if stop_requesting_member_id is not None:
+			state.mark_stop_requested(stop_requesting_member_id)
 			return self._finalize_result(
 				admin=admin,
 				friends=friends,
 				group_conversation=group_conversation,
 				private_conversations=private_conversations,
-				preferences_by_round=preferences_by_round,
-				final_choice=final_choice,
-				consensus_reached=consensus_reached,
-				stopped_early=True,
-				stop_requested_by_member_id=stop_requesting_member_id,
-				trace_events=trace_recorder.events,
+				state=state,
 			)
 
-		round_index = 0
-		while config.continue_until_stopped or round_index < config.max_discussion_rounds:
-			available_speakers = [persona.name for persona in config.friends]
-			messages_sent_this_round = 0
+		while config.continue_until_stopped or not state.consensus_reached:
+			round_state = state.start_round([persona.name for persona in config.friends])
 
-			while available_speakers:
+			while round_state.available_speakers:
 				stop_requesting_member_id = self._check_stop_requested(
 					termination_policy=termination_policy,
 					conversation_id=group_conversation.id,
-					trace_recorder=trace_recorder,
+					trace_recorder=state.trace_recorder,
 					member_names_by_id=member_names_by_id,
-					round_index=round_index,
+					round_index=state.round_index,
 				)
 				if stop_requesting_member_id is not None:
+					state.mark_stop_requested(stop_requesting_member_id)
 					return self._finalize_result(
 						admin=admin,
 						friends=friends,
 						group_conversation=group_conversation,
 						private_conversations=private_conversations,
-						preferences_by_round=preferences_by_round,
-						final_choice=final_choice,
-						consensus_reached=consensus_reached,
-						stopped_early=True,
-						stop_requested_by_member_id=stop_requesting_member_id,
-						trace_events=trace_recorder.events,
+						state=state,
 					)
 
-				candidate_names = turn_policy.order_candidates(available_speakers)
-				trace_recorder.record(
+				candidate_names = turn_policy.order_candidates(round_state.available_speakers)
+				state.trace_recorder.record(
 					event_type="turn_candidates_ordered",
-					round_index=round_index,
+					round_index=state.round_index,
 					conversation_id=group_conversation.id,
 					details={
 						"candidate_names": list(candidate_names),
-						"available_speakers": list(available_speakers),
-						"messages_sent_this_round": messages_sent_this_round,
+						"available_speakers": list(round_state.available_speakers),
+						"messages_sent_this_round": round_state.messages_sent_this_round,
 					},
 				)
 				next_speaker: tuple[str, str] | None = None
 
 				for persona_name in candidate_names:
-					trace_recorder.record(
+					state.trace_recorder.record(
 						event_type="turn_offered",
-						round_index=round_index,
+						round_index=state.round_index,
 						member_id=member_ids_by_name[persona_name],
 						member_name=persona_name,
 						conversation_id=group_conversation.id,
 						details={
-							"messages_sent_this_round": messages_sent_this_round,
-							"available_speakers": list(available_speakers),
+							"messages_sent_this_round": round_state.messages_sent_this_round,
+							"available_speakers": list(round_state.available_speakers),
 						},
 					)
 					message = runtimes[persona_name].decide_message(
 						group_conversation_id=group_conversation.id,
 						private_conversation_id=private_conversations[persona_name].id,
 						destination_options=config.destination_options,
-						round_index=round_index,
-						max_rounds=max(config.max_discussion_rounds, round_index + 1),
-						messages_sent_this_round=messages_sent_this_round,
+						round_index=state.round_index,
+						messages_sent_this_round=round_state.messages_sent_this_round,
 					)
 					if message is None:
-						trace_recorder.record(
+						state.trace_recorder.record(
 							event_type="turn_skipped",
-							round_index=round_index,
+							round_index=state.round_index,
 							member_id=member_ids_by_name[persona_name],
 							member_name=persona_name,
 							conversation_id=group_conversation.id,
@@ -295,58 +363,52 @@ class FriendsTripSimulationEngine:
 				speaker_name, message = next_speaker
 				friends_by_name[speaker_name].send_message(group_conversation, message)
 				self._record_message_posted(
-					trace_recorder,
-					round_index=round_index,
+					state.trace_recorder,
+					round_index=state.round_index,
 					member_id=member_ids_by_name[speaker_name],
 					member_name=speaker_name,
 					conversation_id=group_conversation.id,
 					content=message,
 					message_scope="group",
 				)
-				available_speakers.remove(speaker_name)
-				messages_sent_this_round += 1
+				round_state.mark_message_sent(speaker_name)
 				self._sleep(config.action_delay_seconds)
 				stop_requesting_member_id = self._check_stop_requested(
 					termination_policy=termination_policy,
 					conversation_id=group_conversation.id,
-					trace_recorder=trace_recorder,
+					trace_recorder=state.trace_recorder,
 					member_names_by_id=member_names_by_id,
-					round_index=round_index,
+					round_index=state.round_index,
 				)
 				if stop_requesting_member_id is not None:
+					state.mark_stop_requested(stop_requesting_member_id)
 					return self._finalize_result(
 						admin=admin,
 						friends=friends,
 						group_conversation=group_conversation,
 						private_conversations=private_conversations,
-						preferences_by_round=preferences_by_round,
-						final_choice=final_choice,
-						consensus_reached=consensus_reached,
-						stopped_early=True,
-						stop_requested_by_member_id=stop_requesting_member_id,
-						trace_events=trace_recorder.events,
+						state=state,
 					)
 
 			stop_requesting_member_id = self._check_stop_requested(
 				termination_policy=termination_policy,
 				conversation_id=group_conversation.id,
-				trace_recorder=trace_recorder,
+				trace_recorder=state.trace_recorder,
 				member_names_by_id=member_names_by_id,
-				round_index=round_index,
+				round_index=state.round_index,
 			)
 			if stop_requesting_member_id is not None:
+				state.mark_stop_requested(stop_requesting_member_id)
 				return self._finalize_result(
 					admin=admin,
 					friends=friends,
 					group_conversation=group_conversation,
 					private_conversations=private_conversations,
-					preferences_by_round=preferences_by_round,
-					final_choice=final_choice,
-					consensus_reached=consensus_reached,
-					stopped_early=True,
-					stop_requested_by_member_id=stop_requesting_member_id,
-					trace_events=trace_recorder.events,
+					state=state,
 				)
+
+			if not config.continue_until_stopped and round_state.messages_sent_this_round == 0:
+				break
 
 			preferences = {
 				persona.name: runtimes[persona.name].decide_choice(
@@ -356,11 +418,11 @@ class FriendsTripSimulationEngine:
 				)
 				for persona in config.friends
 			}
-			preferences_by_round.append(preferences)
+			state.record_preferences(preferences)
 			consensus_decision = termination_policy.evaluate(messages=[], preferences=preferences)
-			trace_recorder.record(
+			state.trace_recorder.record(
 				event_type="consensus_checked",
-				round_index=round_index,
+				round_index=state.round_index,
 				conversation_id=group_conversation.id,
 				details={
 					"preferences": dict(preferences),
@@ -368,14 +430,10 @@ class FriendsTripSimulationEngine:
 					"consensus_reached": consensus_decision.consensus_choice is not None,
 				},
 			)
-			if consensus_decision.consensus_choice is not None:
-				final_choice = consensus_decision.consensus_choice
-				consensus_reached = True
-			elif not config.continue_until_stopped:
-				final_choice = NO_TRIP_CHOICE
+			state.apply_consensus(consensus_decision.consensus_choice)
 
-			round_index += 1
-			if not config.continue_until_stopped and consensus_reached:
+			state.advance_round()
+			if not config.continue_until_stopped and state.consensus_reached:
 				break
 
 		if config.continue_until_stopped:
@@ -384,14 +442,11 @@ class FriendsTripSimulationEngine:
 				friends=friends,
 				group_conversation=group_conversation,
 				private_conversations=private_conversations,
-				preferences_by_round=preferences_by_round,
-				final_choice=final_choice,
-				consensus_reached=consensus_reached,
-				trace_events=trace_recorder.events,
+				state=state,
 			)
 
-		if not consensus_reached:
-			final_choice = NO_TRIP_CHOICE
+		if not state.consensus_reached:
+			state.final_choice = NO_TRIP_CHOICE
 			admin.send_message(
 				group_conversation,
 				(
@@ -400,7 +455,7 @@ class FriendsTripSimulationEngine:
 				),
 			)
 			self._record_message_posted(
-				trace_recorder,
+				state.trace_recorder,
 				round_index=None,
 				member_id=admin.id,
 				member_name=config.admin_name,
@@ -413,10 +468,10 @@ class FriendsTripSimulationEngine:
 			)
 			self._sleep(config.action_delay_seconds)
 
-		final_message = self._format_final_message(final_choice, timeout_minutes=config.host_decision_timeout_minutes)
+		final_message = self._format_final_message(state.final_choice, timeout_minutes=config.host_decision_timeout_minutes)
 		admin.send_message(group_conversation, final_message)
 		self._record_message_posted(
-			trace_recorder,
+			state.trace_recorder,
 			round_index=None,
 			member_id=admin.id,
 			member_name=config.admin_name,
@@ -430,10 +485,7 @@ class FriendsTripSimulationEngine:
 			friends=friends,
 			group_conversation=group_conversation,
 			private_conversations=private_conversations,
-			preferences_by_round=preferences_by_round,
-			final_choice=final_choice,
-			consensus_reached=consensus_reached,
-			trace_events=trace_recorder.events,
+			state=state,
 		)
 
 	def _finalize_result(
@@ -443,24 +495,14 @@ class FriendsTripSimulationEngine:
 		friends: list[chatapp.ChatMember],
 		group_conversation: chatapp.ChatConversation,
 		private_conversations: dict[str, chatapp.ChatConversation],
-		preferences_by_round: list[dict[str, str]],
-		final_choice: str,
-		consensus_reached: bool,
-		stopped_early: bool = False,
-		stop_requested_by_member_id: str | None = None,
-		trace_events: list[SimulationTraceEvent] | None = None,
+		state: FriendsTripSimulationState,
 	) -> FriendsTripSimulationResult:
 		result = self._build_result(
 			admin=admin,
 			friends=friends,
 			group_conversation=group_conversation,
 			private_conversations=private_conversations,
-			preferences_by_round=preferences_by_round,
-			final_choice=final_choice,
-			consensus_reached=consensus_reached,
-			stopped_early=stopped_early,
-			stop_requested_by_member_id=stop_requested_by_member_id,
-			trace_events=trace_events,
+			state=state,
 		)
 		self._gateway.create_simulation_trace_run(
 			scenario_type="trip_planner",
@@ -507,24 +549,19 @@ class FriendsTripSimulationEngine:
 		friends: list[chatapp.ChatMember],
 		group_conversation: chatapp.ChatConversation,
 		private_conversations: dict[str, chatapp.ChatConversation],
-		preferences_by_round: list[dict[str, str]],
-		final_choice: str,
-		consensus_reached: bool,
-		stopped_early: bool = False,
-		stop_requested_by_member_id: str | None = None,
-		trace_events: list[SimulationTraceEvent] | None = None,
+		state: FriendsTripSimulationState,
 	) -> FriendsTripSimulationResult:
 		return FriendsTripSimulationResult(
 			admin_member=admin.payload,
 			friends=[friend.payload for friend in friends],
 			group_conversation=group_conversation.payload,
 			private_conversations={name: conversation.payload for name, conversation in private_conversations.items()},
-			preferences_by_round=preferences_by_round,
-			final_choice=final_choice,
-			consensus_reached=consensus_reached,
-			stopped_early=stopped_early,
-			stop_requested_by_member_id=stop_requested_by_member_id,
-			trace_events=[] if trace_events is None else list(trace_events),
+			preferences_by_round=list(state.preferences_by_round),
+			final_choice=state.final_choice,
+			consensus_reached=state.consensus_reached,
+			stopped_early=state.stopped_early,
+			stop_requested_by_member_id=state.stop_requested_by_member_id,
+			trace_events=list(state.trace_events),
 		)
 
 	def _check_stop_requested(
@@ -628,7 +665,7 @@ def parse_args() -> argparse.Namespace:
 		default=list(DEFAULT_DESTINATION_OPTIONS),
 		help="Destination options the group can consider.",
 	)
-	parser.add_argument("--max-rounds", type=int, default=2, help="Maximum number of discussion rounds before auto-finishing. Ignored unless --auto-finish is set.")
+	parser.add_argument("--max-rounds", type=int, default=2, help="Legacy compatibility option. The simulation is no longer bounded by a fixed round count.")
 	parser.add_argument(
 		"--llm-provider",
 		choices=["openai", "primeintellect"],

@@ -4,6 +4,51 @@
 
 The chat app is the stable core of the repository. It owns members, conversations, memberships, messages, and realtime updates. Everything else in the repo should use this layer instead of mutating storage directly.
 
+## Current situation
+
+Right now, the chat layer can already host mixed participants:
+
+- human-controlled members
+- LLM-backed members
+- scripted members
+
+They all use the same chat contract. In practice, this means the simulation layer, the Python facade, and human-driven clients all interact with the same member, conversation, membership, and message rules instead of bypassing the chat app.
+
+The important constraint is that members are not omnipotent. A member can only do what its capability policy and conversation memberships allow. So the right description is not "members can do anything they want", but rather "members act through a shared chat interface, with permissions enforced by the chat core".
+
+Today, that makes the chat app a usable substrate for scenarios where multiple LLMs and a human coexist in the same system, read different conversations, send messages, join or leave chats, and react to the same realtime events.
+
+## Member-facing Python surface
+
+The Python facade in `chatapp/` already exposes a practical member-oriented interface on top of the HTTP API.
+
+At the server level:
+
+- `ChatServer.add_member(...)`
+- `ChatServer.create_group_chat(...)`
+- `ChatServer.create_direct_chat(...)`
+- `ChatServer.open_session(...)`
+
+At the member level:
+
+- `ChatMember.send_message(...)`
+- `ChatMember.read_messages(...)`
+- `ChatMember.create_group_chat(...)`
+- `ChatMember.start_direct_chat(...)`
+- `ChatMember.pause_group_chat(...)`
+- `ChatMember.resume_group_chat(...)`
+- `ChatMember.leave(...)`
+
+At the conversation level:
+
+- `ChatConversation.add_member(...)`
+- `ChatConversation.remove_member(...)`
+- `ChatConversation.pause(...)`
+- `ChatConversation.resume(...)`
+- `ChatConversation.list_messages(...)`
+
+That is enough to treat members as first-class participants instead of as hard-coded simulation actors. The main limitation is not lack of a basic chat contract anymore. The current limitations are higher-level concerns such as richer scenario orchestration, replay, evaluation, and broader generalization of scenario logic.
+
 ## Main entry points
 
 - `main.py`: creates the FastAPI app, includes REST and websocket routers, and initializes the database on startup.

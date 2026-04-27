@@ -118,6 +118,20 @@ class AppStore:
         agent = self.agents.get(agent_id)
         return agent.display_name if agent else agent_id
 
+    def get_agent(self, agent_id: str) -> AgentRecord | None:
+        return self.agents.get(agent_id)
+
+    def preferred_sender_id_for_conversation(self, conversation: ConversationRecord) -> str | None:
+        if not conversation.participant_ids:
+            return None
+
+        for participant_id in conversation.participant_ids:
+            agent = self.agents.get(participant_id)
+            if agent is not None and agent.type == "human":
+                return participant_id
+
+        return conversation.participant_ids[0]
+
     def resolve_agent_id(self, agent_reference: str) -> str | None:
         normalized_reference = agent_reference.strip()
         if not normalized_reference:

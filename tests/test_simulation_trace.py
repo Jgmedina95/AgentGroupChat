@@ -158,7 +158,7 @@ def test_trace_log_is_rendered_as_human_readable_events(tmp_path: Path) -> None:
 			decision_client = ScriptedTripDecisionClient(
 				message_responses={
 					"Lara": ["I would love somewhere warm and easygoing.", "NO_MESSAGE"],
-					"Owen": ["NO_MESSAGE", "NO_MESSAGE"],
+					"Owen": ["NO_MESSAGE", "NO_MESSAGE", "NO_MESSAGE"],
 				},
 				choice_responses={
 					"Lara": ["Lisbon"],

@@ -96,7 +96,6 @@ class TripPlannerRuntime:
 		private_conversation_id: str,
 		destination_options: list[str],
 		round_index: int,
-		max_rounds: int,
 		messages_sent_this_round: int,
 	) -> str | None:
 		group_messages = self._gateway.list_member_visible_messages(self._member_id, group_conversation_id)
@@ -112,7 +111,7 @@ class TripPlannerRuntime:
 				f"If you would rather wait and read more before replying, answer with exactly {NO_MESSAGE_CHOICE}."
 			),
 			user_prompt=(
-				f"Round {round_index + 1} of {max_rounds}.\n"
+				f"Round {round_index + 1}.\n"
 				f"Messages already sent in this round: {messages_sent_this_round}.\n"
 				f"Possible outcomes: {destination_options + [NO_TRIP_CHOICE]}\n\n"
 				"Visible group chat transcript:\n"

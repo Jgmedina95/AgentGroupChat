@@ -223,7 +223,7 @@ Run the friends trip planner against the live server with:
 .venv/bin/python -m simulation.trip_planner --api-base-url http://127.0.0.1:8000
 ```
 
-By default, the trip planner now behaves like a live conversation: it keeps going until someone in the group sends the exact stop command, which defaults to `stop`. Use `--auto-finish` if you want the older round-limited host conclusion behavior.
+By default, the trip planner now behaves like a live conversation: it keeps going until the group reaches consensus, someone in the group sends the exact stop command, or the discussion stalls with no new messages. Use `--auto-finish` if you still want the host to conclude the run automatically instead of waiting for a stop message.
 
 The simulation can use:
 
@@ -256,6 +256,22 @@ admin.send_message(session, "Rules of the game")
 
 LLM-backed members can still use the existing runtime layer. The facade only changes how the simulation code talks to the chat system.
 
+For a minimal human-to-LLM direct chat example, run:
+
+```bash
+.venv/bin/python scripts/minimal_human_llm_chat.py --host-name Jorge --assistant-name Copilot
+```
+
+This creates one human member, one LLM-backed member, and a direct chat between them. Each time you type a message, the script posts it as the human member, asks the LLM member for the next reply based on the visible conversation, and posts that reply back into the same chat.
+
+If you want to use the TUI as the human side instead of the script prompt, run:
+
+```bash
+.venv/bin/python scripts/minimal_human_llm_chat.py --mode tui --host-name Jorge --assistant-name Copilot
+```
+
+That creates the same direct chat but keeps the assistant alive in the background. You can then open the TUI, select that conversation, and send messages as the host member while the LLM member replies into the same thread.
+
 - rule-based players
 - Prime Intellect LLM players
 - OpenAI-compatible LLM players
@@ -284,6 +300,7 @@ What it does now:
 - subscribes to live websocket updates for the selected conversation
 - refreshes member records when new senders or conversations appear so message history prefers display names over raw ids
 - lets you send a message by entering a sender display name or sender id plus message content
+- prefers the human participant as the default sender in direct chats when one exists
 
 Controls:
 

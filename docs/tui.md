@@ -54,7 +54,10 @@ Current TUI capabilities:
 - inspect message history
 - watch live message updates
 - send a message by entering a sender display name or sender id plus content
+- default the sender field to the human participant for direct chats when one exists
 - manually refresh loaded data
+
+This matters for the minimal human-to-LLM direct chat example: the TUI can act as the human side of the conversation while the background assistant script posts the LLM replies into the same direct thread.
 
 Current limitations:
 

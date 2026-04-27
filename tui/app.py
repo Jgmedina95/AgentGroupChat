@@ -198,8 +198,19 @@ class ChatAdminApp(App[None]):
         details = f"{conversation.label} [{conversation.type}]\nParticipants: {participants}"
         self.query_one("#conversation-meta", Static).update(details)
         sender_input = self.query_one("#sender-input", Input)
-        if conversation.participant_ids and not sender_input.value:
-            sender_input.value = self.store.get_agent_name(conversation.participant_ids[0])
+        preferred_sender_id = self.store.preferred_sender_id_for_conversation(conversation)
+        current_sender_id = self.store.resolve_agent_id(sender_input.value)
+        current_sender = self.store.get_agent(current_sender_id) if current_sender_id is not None else None
+        if (
+            preferred_sender_id is not None
+            and (
+                current_sender_id is None
+                or current_sender_id not in conversation.participant_ids
+                or current_sender is None
+                or current_sender.type == "llm"
+            )
+        ):
+            sender_input.value = self.store.get_agent_name(preferred_sender_id)
 
     @property
     def name_lookup(self) -> dict[str, str]:

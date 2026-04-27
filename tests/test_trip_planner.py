@@ -9,7 +9,7 @@ import api.websockets as websocket_module
 from db.session import create_connection, get_db, init_db
 from main import app
 from simulation.runtimes.trip_planner import ScriptedTripDecisionClient, TripFriendPersona, TripPlannerRuntimeFactory
-from simulation.trip_planner import FriendsTripConfig, FriendsTripSimulationEngine
+from simulation.trip_planner import FriendsTripConfig, FriendsTripSimulationEngine, FriendsTripSimulationState
 from chatapp.gateway import TestClientChatGateway
 
 
@@ -59,6 +59,37 @@ class StopInjectingChatGateway(TestClientChatGateway):
 			super().post_member_message(member_id=stop_member_id, conversation_id=conversation_id, content=self._stop_command)
 			self._stop_injected = True
 		return message
+
+
+def test_trip_planner_state_tracks_round_progress_and_stop() -> None:
+	state = FriendsTripSimulationState()
+	round_state = state.start_round(["Nina", "Marco"])
+
+	assert round_state.round_index == 0
+	assert round_state.available_speakers == ["Nina", "Marco"]
+	assert round_state.messages_sent_this_round == 0
+
+	round_state.mark_message_sent("Nina")
+	state.record_preferences({"Nina": "Lisbon", "Marco": "Lisbon"})
+	state.apply_consensus("Lisbon")
+	state.trace_recorder.record(event_type="turn_offered", round_index=0, member_name="Nina")
+	state.advance_round()
+	state.mark_stop_requested("member-1")
+	snapshot = state.to_dict()
+
+	assert round_state.available_speakers == ["Marco"]
+	assert round_state.messages_sent_this_round == 1
+	assert state.preferences_by_round == [{"Nina": "Lisbon", "Marco": "Lisbon"}]
+	assert state.final_choice == "Lisbon"
+	assert state.consensus_reached is True
+	assert state.round_index == 1
+	assert state.active_round is None
+	assert state.stopped_early is True
+	assert state.stop_requested_by_member_id == "member-1"
+	assert snapshot["round_index"] == 1
+	assert snapshot["preferences_by_round"] == [{"Nina": "Lisbon", "Marco": "Lisbon"}]
+	assert snapshot["active_round"] is None
+	assert snapshot["trace_events"][0]["event_type"] == "turn_offered"
 
 
 def test_trip_planner_reaches_destination_consensus(tmp_path: Path) -> None:
@@ -170,10 +201,10 @@ def test_trip_planner_defaults_to_no_trip_without_unanimity(tmp_path: Path) -> N
 		with TestClient(app) as client:
 			decision_client = ScriptedTripDecisionClient(
 				message_responses={
-					"Nina": ["Lisbon still feels balanced to me."],
-					"Marco": ["I can afford Lisbon if we plan ahead."],
-					"Leah": ["Lisbon sounds fun and easy."],
-					"Owen": ["I still think Vancouver is simpler for me to manage."],
+					"Nina": ["Lisbon still feels balanced to me.", "NO_MESSAGE"],
+					"Marco": ["I can afford Lisbon if we plan ahead.", "NO_MESSAGE"],
+					"Leah": ["Lisbon sounds fun and easy.", "NO_MESSAGE"],
+					"Owen": ["I still think Vancouver is simpler for me to manage.", "NO_MESSAGE"],
 				},
 				choice_responses={
 					"Nina": ["Lisbon"],
@@ -227,6 +258,7 @@ def test_trip_planner_defaults_to_no_trip_without_unanimity(tmp_path: Path) -> N
 			assert result.consensus_reached is False
 			assert result.final_choice == "NO_TRIP"
 			assert result.stopped_early is False
+			assert result.preferences_by_round == [{"Leah": "Lisbon", "Marco": "Lisbon", "Nina": "Lisbon", "Owen": "Vancouver"}]
 
 			group_messages = engine._gateway.list_conversation_messages(result.group_conversation["id"])
 			group_contents = [message["content"] for message in group_messages]

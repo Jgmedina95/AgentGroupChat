@@ -90,9 +90,11 @@ Current responsibilities:
 4. let the initiator start the discussion in the group chat
 5. offer speaking opportunities each round while allowing friends to stay quiet and wait for more context
 6. collect each friend's current preference after a round
-7. either auto-finish with a host conclusion or keep running until someone posts the configured stop command
+7. either auto-finish with a host conclusion or keep running until the group reaches consensus, someone posts the configured stop command, or the discussion stalls
 
 When `continue_until_stopped=True`, the engine behaves like a live chat client: the discussion can continue past the nominal round limit and ends only when the configured stop message appears in the group conversation.
+
+When `continue_until_stopped=False`, the trip planner is also no longer bounded by a fixed round count for the final outcome. It keeps discussing until the group reaches consensus or the conversation stalls with no new messages, at which point the host concludes with the no-trip outcome.
 
 ## Runtime model
 
@@ -173,9 +175,9 @@ The trip planner uses live LLM-backed friends by default and pauses between acti
 Important trip planner flags:
 
 - `--stop-command` to change the exact message that ends a live run
-- `--auto-finish` to re-enable the old round-limited host conclusion flow
+- `--auto-finish` to let the host conclude the run automatically when the discussion stalls instead of waiting for an explicit stop message
 - `--discussion-seed` for reproducible turn-taking
-- `--max-rounds` to control the round limit when `--auto-finish` is enabled
+- `--max-rounds` is now a legacy compatibility option and no longer bounds the outcome directly
 
 Force rule-based players:
 
@@ -194,9 +196,8 @@ python -m simulation.engine \
 
 ## Current limitations
 
-- only one round is orchestrated today
 - no alive or eliminated roster is persisted across rounds
-- there is no generic scenario state object yet beyond the Impostor config and result
+- generic scenario abstractions are still incomplete even though the trip planner now has explicit simulation state
 - the admin is scripted, not LLM-backed
 - votes are collected through private direct messages, not poll primitives
 - the notebook trip demo is still synchronous, so truly interactive stop-control is cleaner through the live server or TUI than through the in-process notebook flow
