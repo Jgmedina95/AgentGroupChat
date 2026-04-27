@@ -12,7 +12,9 @@ from chatapp.options import pause_group_chat, read_messages, resume_group_chat, 
 from app_env import load_environment
 from db.session import create_connection, get_db, init_db
 from main import app
+from simulation.core.scenario import run_scenario_spec
 from simulation.engine import ImpostorGameConfig, ImpostorSimulationEngine, TestClientChatGateway
+from simulation.engine import ImpostorPacingSpec, ImpostorScenarioSpec
 from simulation.runtimes.llm import (
     LLMPlayerRuntimeFactory,
     ScriptedLLMDecisionClient,
@@ -150,6 +152,104 @@ def test_impostor_engine_can_use_llm_player_runtime(client: TestClient) -> None:
     assert "Player 2 clue: cider" in group_contents
     assert "Player 3 clue: crisp" in group_contents
     assert "Player 4 clue: green" in group_contents
+
+
+def test_impostor_scenario_spec_builds_config() -> None:
+    spec = ImpostorScenarioSpec(
+        admin_name="Admin",
+        player_names=["Player 1", "Player 2", "Player 3", "Player 4"],
+        group_title="Impostor Night",
+        shared_word="apple",
+        impostor_word="pear",
+        impostor_player_name="Player 4",
+        clue_order=["Player 2", "Player 4", "Player 1", "Player 3"],
+        ready_text="Ready",
+        player_runtime_type="llm",
+        pacing=ImpostorPacingSpec(random_seed=7, action_delay_seconds=0.0, llm_provider="openai"),
+    )
+
+    config = spec.to_config()
+
+    assert config.group_title == "Impostor Night"
+    assert config.impostor_player_name == "Player 4"
+    assert config.clue_order == ["Player 2", "Player 4", "Player 1", "Player 3"]
+    assert config.player_runtime_type == "llm"
+    assert config.random_seed == 7
+    assert config.llm_provider == "openai"
+
+
+def test_impostor_engine_can_run_from_scenario_spec(client: TestClient) -> None:
+    decision_client = ScriptedLLMDecisionClient(
+        ready_responses={
+            "Player 1": "Ready",
+            "Player 2": "Ready",
+            "Player 3": "Ready",
+            "Player 4": "Ready",
+        },
+        clue_responses={
+            "Player 1": "orchard",
+            "Player 2": "cider",
+            "Player 3": "crisp",
+            "Player 4": "green",
+        },
+        vote_responses={
+            "Player 1": "Player 4",
+            "Player 2": "Player 4",
+            "Player 3": "Player 4",
+            "Player 4": "Player 1",
+        },
+    )
+    engine = ImpostorSimulationEngine(
+        TestClientChatGateway(client),
+        llm_runtime_factory=LLMPlayerRuntimeFactory(decision_client),
+    )
+    spec = ImpostorScenarioSpec.from_dict(
+        {
+            "admin_name": "Admin",
+            "player_names": ["Player 1", "Player 2", "Player 3", "Player 4"],
+            "group_title": "Impostor Night",
+            "shared_word": "apple",
+            "impostor_word": "pear",
+            "impostor_player_name": "Player 4",
+            "clue_order": ["Player 1", "Player 2", "Player 3", "Player 4"],
+            "ready_text": "Ready",
+            "player_runtime_type": "llm",
+            "pacing": {"random_seed": 7, "action_delay_seconds": 0.0},
+        }
+    )
+
+    result = engine.run_spec(spec)
+
+    assert result.impostor_player_name == "Player 4"
+    assert result.eliminated_player_name == "Player 4"
+    assert result.group_conversation["title"] == "Impostor Night"
+
+    second_engine = ImpostorSimulationEngine(
+        TestClientChatGateway(client),
+        llm_runtime_factory=LLMPlayerRuntimeFactory(
+            ScriptedLLMDecisionClient(
+                ready_responses={
+                    "Player 1": "Ready",
+                    "Player 2": "Ready",
+                    "Player 3": "Ready",
+                    "Player 4": "Ready",
+                },
+                clue_responses={
+                    "Player 1": "orchard",
+                    "Player 2": "cider",
+                    "Player 3": "crisp",
+                    "Player 4": "green",
+                },
+                vote_responses={
+                    "Player 1": "Player 4",
+                    "Player 2": "Player 4",
+                    "Player 3": "Player 4",
+                    "Player 4": "Player 1",
+                },
+            )
+        ),
+    )
+    assert run_scenario_spec(second_engine, spec).group_conversation["title"] == "Impostor Night"
 
 
 def test_chatapp_facade_supports_member_actions(client: TestClient) -> None:

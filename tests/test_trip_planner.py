@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import api.websockets as websocket_module
 from db.session import create_connection, get_db, init_db
 from main import app
 from simulation.runtimes.trip_planner import ScriptedTripDecisionClient, TripFriendPersona, TripPlannerRuntimeFactory
+from simulation.core.scenario import run_scenario_spec
 from simulation.trip_planner import (
 	FriendsTripConfig,
 	FriendsTripFriendSpec,
@@ -136,6 +138,7 @@ def test_trip_planner_scenario_spec_builds_config() -> None:
 	assert config.continue_until_stopped is True
 	assert config.host_decision_timeout_minutes == 3.0
 	assert config.max_discussion_rounds == 9
+	assert spec.to_dict()["termination"]["stop_command"] == "done"
 
 
 def test_trip_planner_can_run_from_scenario_spec(tmp_path: Path) -> None:
@@ -206,9 +209,53 @@ def test_trip_planner_can_run_from_scenario_spec(tmp_path: Path) -> None:
 			assert result.final_choice == "Lisbon"
 			assert result.group_conversation["title"] == "Weekend Escape"
 			assert [friend["display_name"] for friend in result.friends] == ["Nina", "Marco"]
+
+			second_engine = FriendsTripSimulationEngine(
+				TestClientChatGateway(client),
+				runtime_factory=TripPlannerRuntimeFactory(
+					ScriptedTripDecisionClient(
+						message_responses={
+							"Nina": ["Lisbon still feels realistic for everyone."],
+							"Marco": ["Lisbon works for me if we stay on budget."],
+						},
+						choice_responses={
+							"Nina": ["Lisbon"],
+							"Marco": ["Lisbon"],
+						},
+					)
+				),
+			)
+			assert run_scenario_spec(second_engine, spec).group_conversation["title"] == "Weekend Escape"
 	finally:
 		app.dependency_overrides.clear()
 		websocket_module.SessionLocal = original_session_local
+
+
+def test_trip_planner_scenario_spec_round_trips_through_json_file(tmp_path: Path) -> None:
+	spec = FriendsTripScenarioSpec(
+		admin_name="Planner",
+		group_title="Weekend Escape",
+		destination_options=["Lisbon", "Montreal"],
+		friends=[
+			FriendsTripFriendSpec(
+				name="Nina",
+				traits=["empathetic"],
+				budget_notes="Needs a reasonable plan.",
+				travel_hopes="Wants time together.",
+				worries="Does not want anyone left out.",
+			),
+		],
+		initiator_name="Nina",
+		kickoff_message="Can we find a plan we both like?",
+		pacing=FriendsTripPacingSpec(discussion_seed=7, action_delay_seconds=0.0),
+		termination=FriendsTripTerminationSpec(stop_command="stop", continue_until_stopped=False),
+	)
+	spec_path = tmp_path / "trip-spec.json"
+	spec_path.write_text(json.dumps(spec.to_dict()), encoding="utf-8")
+
+	loaded_spec = FriendsTripScenarioSpec.from_json_file(spec_path)
+
+	assert loaded_spec.to_dict() == spec.to_dict()
 
 
 def test_trip_planner_reaches_destination_consensus(tmp_path: Path) -> None:

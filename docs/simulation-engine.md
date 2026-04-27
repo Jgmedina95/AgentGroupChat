@@ -9,10 +9,24 @@ The current implementation lives under `simulation/` and is intentionally small.
 ## Main files
 
 - `simulation/engine.py`: orchestration entry point and CLI.
+- `simulation/core/scenario.py`: shared scenario-spec and scenario-engine contract.
 - `simulation/runtimes/llm.py`: LLM-backed player interface and provider selection.
 - `simulation/runtimes/rule_based.py`: deterministic fallback behavior for local runs and tests.
 - `simulation/trip_planner.py`: friends trip scenario orchestration and CLI.
 - `simulation/runtimes/trip_planner.py`: persona-driven trip-planner runtime and scripted test client.
+
+## Shared scenario contract
+
+Scenario specs are starting to move behind a shared contract in `simulation/core/scenario.py`.
+
+The current shared pieces are:
+
+- `ScenarioSpec`: declarative spec that can build an executable config
+- `JsonScenarioSpec`: helper for loading a spec from JSON
+- `ScenarioEngine`: executable engine contract
+- `run_scenario_spec(...)`: shared path for executing a spec through an engine
+
+This is still early, but it means the declarative-spec pattern is no longer trip-planner-only. Both the trip planner and the impostor engine can now run from structured specs.
 
 ## Key pieces in `simulation/engine.py`
 
@@ -29,6 +43,18 @@ Important fields:
 - `player_runtime_type`
 - `llm_provider`
 - `action_delay_seconds`
+
+### `ImpostorScenarioSpec`
+
+Defines the declarative version of the impostor scenario.
+
+Important sections:
+
+- player roster and group title
+- word assignment settings
+- clue order and ready text
+- runtime type
+- pacing settings such as random seed and delay
 
 ### `RestChatGateway`
 
@@ -164,6 +190,12 @@ Run a simulation against the live server:
 python -m simulation.engine --api-base-url http://127.0.0.1:8000
 ```
 
+The impostor engine can now also run from a declarative JSON scenario spec:
+
+```bash
+.venv/bin/python -m simulation.engine --api-base-url http://127.0.0.1:8000 --spec-file path/to/impostor-spec.json
+```
+
 Run the friends trip planner against the live server:
 
 ```bash
@@ -224,6 +256,27 @@ Force rule-based players:
 
 ```bash
 python -m simulation.engine --api-base-url http://127.0.0.1:8000 --player-runtime rule_based
+```
+
+Minimal example impostor spec shape:
+
+```json
+{
+  "admin_name": "Admin",
+  "player_names": ["Player 1", "Player 2", "Player 3", "Player 4"],
+  "group_title": "Impostor Night",
+  "shared_word": "apple",
+  "impostor_word": "pear",
+  "impostor_player_name": "Player 4",
+  "clue_order": ["Player 1", "Player 2", "Player 3", "Player 4"],
+  "ready_text": "Ready",
+  "player_runtime_type": "llm",
+  "pacing": {
+    "random_seed": 7,
+    "action_delay_seconds": 0.0,
+    "llm_provider": "openai"
+  }
+}
 ```
 
 Force Prime Intellect explicitly:

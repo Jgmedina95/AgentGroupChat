@@ -217,6 +217,12 @@ Run it against the live server with:
 .venv/bin/python -m simulation.engine --api-base-url http://127.0.0.1:8000
 ```
 
+You can also drive the impostor engine from a declarative JSON scenario spec:
+
+```bash
+.venv/bin/python -m simulation.engine --api-base-url http://127.0.0.1:8000 --spec-file path/to/impostor-spec.json
+```
+
 Run the friends trip planner against the live server with:
 
 ```bash

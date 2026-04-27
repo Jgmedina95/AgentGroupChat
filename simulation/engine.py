@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import json
 import random
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import chatapp
 from chatapp.gateway import DEFAULT_API_BASE_URL, HttpChatGateway, RestChatGateway, TestClientChatGateway
 from chatapp.runtimes import attach_llm_runtimes
 
+from simulation.core.scenario import JsonScenarioSpec, run_scenario_spec
 from simulation.runtimes.llm import LLMPlayerRuntimeFactory
 from simulation.runtimes.rule_based import build_vote_map, choose_clue
 
@@ -21,6 +24,93 @@ DEFAULT_PLAYER_RUNTIME_TYPE = "rule_based"
 DEFAULT_ADMIN_RUNTIME_TYPE = "human"
 
 RULES_TEXT = """Rules of the Game:\nAll the players will receive one of two words.\nNone of the players know what the other word is.\n3 players will have the same word, the other one doesnt.\nThen each player will say one word related to the word they received.\nAfter each round, players vote for which Player they think has a different word.\nIf correct, other players win. If after two rounds the impostor is not voted out, the impostor wins.\nAnswer with Ready if you are."""
+
+
+@dataclass(slots=True)
+class ImpostorPacingSpec:
+	random_seed: int | None = None
+	action_delay_seconds: float = 0.0
+	llm_provider: str | None = None
+
+	@classmethod
+	def from_dict(cls, payload: dict[str, Any] | None) -> ImpostorPacingSpec:
+		if payload is None:
+			return cls()
+		return cls(
+			random_seed=payload.get("random_seed"),
+			action_delay_seconds=float(payload.get("action_delay_seconds", 0.0)),
+			llm_provider=payload.get("llm_provider"),
+		)
+
+	def to_dict(self) -> dict[str, Any]:
+		return {
+			"random_seed": self.random_seed,
+			"action_delay_seconds": self.action_delay_seconds,
+			"llm_provider": self.llm_provider,
+		}
+
+
+@dataclass(slots=True)
+class ImpostorScenarioSpec(JsonScenarioSpec[Any]):
+	admin_name: str = "Admin"
+	player_names: list[str] = field(default_factory=lambda: ["Player 1", "Player 2", "Player 3", "Player 4"])
+	group_title: str = DEFAULT_GROUP_TITLE
+	shared_word: str = "apple"
+	impostor_word: str = "pear"
+	impostor_player_name: str | None = None
+	clue_order: list[str] | None = None
+	ready_text: str = DEFAULT_READY_TEXT
+	player_runtime_type: str = DEFAULT_PLAYER_RUNTIME_TYPE
+	admin_runtime_type: str = DEFAULT_ADMIN_RUNTIME_TYPE
+	pacing: ImpostorPacingSpec = field(default_factory=ImpostorPacingSpec)
+
+	def to_config(self) -> ImpostorGameConfig:
+		return ImpostorGameConfig(
+			admin_name=self.admin_name,
+			player_names=list(self.player_names),
+			group_title=self.group_title,
+			shared_word=self.shared_word,
+			impostor_word=self.impostor_word,
+			impostor_player_name=self.impostor_player_name,
+			clue_order=None if self.clue_order is None else list(self.clue_order),
+			ready_text=self.ready_text,
+			random_seed=self.pacing.random_seed,
+			player_runtime_type=self.player_runtime_type,
+			llm_provider=self.pacing.llm_provider,
+			admin_runtime_type=self.admin_runtime_type,
+			action_delay_seconds=self.pacing.action_delay_seconds,
+		)
+
+	@classmethod
+	def from_dict(cls, payload: dict[str, Any]) -> ImpostorScenarioSpec:
+		return cls(
+			admin_name=str(payload.get("admin_name", "Admin")),
+			player_names=[str(name) for name in payload.get("player_names", ["Player 1", "Player 2", "Player 3", "Player 4"])],
+			group_title=str(payload.get("group_title", DEFAULT_GROUP_TITLE)),
+			shared_word=str(payload.get("shared_word", "apple")),
+			impostor_word=str(payload.get("impostor_word", "pear")),
+			impostor_player_name=payload.get("impostor_player_name"),
+			clue_order=None if payload.get("clue_order") is None else [str(name) for name in payload.get("clue_order", [])],
+			ready_text=str(payload.get("ready_text", DEFAULT_READY_TEXT)),
+			player_runtime_type=str(payload.get("player_runtime_type", DEFAULT_PLAYER_RUNTIME_TYPE)),
+			admin_runtime_type=str(payload.get("admin_runtime_type", DEFAULT_ADMIN_RUNTIME_TYPE)),
+			pacing=ImpostorPacingSpec.from_dict(payload.get("pacing")),
+		)
+
+	def to_dict(self) -> dict[str, Any]:
+		return {
+			"admin_name": self.admin_name,
+			"player_names": list(self.player_names),
+			"group_title": self.group_title,
+			"shared_word": self.shared_word,
+			"impostor_word": self.impostor_word,
+			"impostor_player_name": self.impostor_player_name,
+			"clue_order": None if self.clue_order is None else list(self.clue_order),
+			"ready_text": self.ready_text,
+			"player_runtime_type": self.player_runtime_type,
+			"admin_runtime_type": self.admin_runtime_type,
+			"pacing": self.pacing.to_dict(),
+		}
 
 
 @dataclass(slots=True)
@@ -215,10 +305,14 @@ class ImpostorSimulationEngine:
 		self._owned_llm_runtime_factory.close()
 		self._owned_llm_runtime_factory = None
 
+	def run_spec(self, spec: ImpostorScenarioSpec) -> ImpostorSimulationResult:
+		return run_scenario_spec(self, spec)
+
 
 def parse_args() -> argparse.Namespace:
 	parser = argparse.ArgumentParser(description="Run one scripted Impostor round through the chat API.")
 	parser.add_argument("--api-base-url", default=DEFAULT_API_BASE_URL, help="Base URL of the running FastAPI app.")
+	parser.add_argument("--spec-file", help="Optional JSON scenario spec file for the impostor engine.")
 	parser.add_argument("--admin-name", default="Admin")
 	parser.add_argument("--player-names", nargs=4, default=["Player 1", "Player 2", "Player 3", "Player 4"])
 	parser.add_argument("--group-title", default=DEFAULT_GROUP_TITLE)
@@ -239,20 +333,23 @@ def main() -> None:
 	engine = ImpostorSimulationEngine(gateway)
 	try:
 		try:
-			result = engine.run(
-				ImpostorGameConfig(
-					admin_name=args.admin_name,
-					player_names=list(args.player_names),
-					group_title=args.group_title,
-					shared_word=args.shared_word,
-					impostor_word=args.impostor_word,
-					impostor_player_name=args.impostor_player,
-					player_runtime_type=args.player_runtime,
-					llm_provider=args.llm_provider,
-					random_seed=args.seed,
-					action_delay_seconds=0.0 if args.no_delay else args.delay,
+			if args.spec_file:
+				result = engine.run_spec(ImpostorScenarioSpec.from_json_file(args.spec_file))
+			else:
+				result = engine.run(
+					ImpostorGameConfig(
+						admin_name=args.admin_name,
+						player_names=list(args.player_names),
+						group_title=args.group_title,
+						shared_word=args.shared_word,
+						impostor_word=args.impostor_word,
+						impostor_player_name=args.impostor_player,
+						player_runtime_type=args.player_runtime,
+						llm_provider=args.llm_provider,
+						random_seed=args.seed,
+						action_delay_seconds=0.0 if args.no_delay else args.delay,
+					)
 				)
-			)
 		except RuntimeError as exc:
 			raise SystemExit(str(exc)) from exc
 		print(f"Created admin: {result.admin_member['display_name']} ({result.admin_member['id']})")

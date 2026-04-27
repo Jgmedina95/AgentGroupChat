@@ -19,6 +19,7 @@ from simulation.core.policies import (
 	TerminationPolicy,
 	UnanimousPreferenceTerminationPolicy,
 )
+from simulation.core.scenario import JsonScenarioSpec, run_scenario_spec
 from simulation.core.trace import SimulationTraceEvent, SimulationTraceRecorder, write_trace_log
 from simulation.runtimes.trip_planner import NO_TRIP_CHOICE, TripFriendPersona, TripPlannerRuntimeFactory
 
@@ -173,7 +174,7 @@ class FriendsTripTerminationSpec:
 
 
 @dataclass(slots=True)
-class FriendsTripScenarioSpec:
+class FriendsTripScenarioSpec(JsonScenarioSpec[Any]):
 	admin_name: str = "Trip Host"
 	group_title: str = DEFAULT_TRIP_GROUP_TITLE
 	destination_options: list[str] = field(default_factory=lambda: list(DEFAULT_DESTINATION_OPTIONS))
@@ -212,13 +213,6 @@ class FriendsTripScenarioSpec:
 			pacing=FriendsTripPacingSpec.from_dict(payload.get("pacing")),
 			termination=FriendsTripTerminationSpec.from_dict(payload.get("termination")),
 		)
-
-	@classmethod
-	def from_json_file(cls, path: str | Path) -> FriendsTripScenarioSpec:
-		payload = json.loads(Path(path).read_text(encoding="utf-8"))
-		if not isinstance(payload, dict):
-			raise ValueError("Friends trip scenario spec file must contain a JSON object")
-		return cls.from_dict(payload)
 
 	def to_dict(self) -> dict[str, Any]:
 		return {
@@ -691,7 +685,7 @@ class FriendsTripSimulationEngine:
 		self._owned_runtime_factory = None
 
 	def run_spec(self, spec: FriendsTripScenarioSpec) -> FriendsTripSimulationResult:
-		return self.run(spec.to_config())
+		return run_scenario_spec(self, spec)
 
 	def _build_runtimes(
 		self,
