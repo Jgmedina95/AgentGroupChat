@@ -117,3 +117,14 @@ class AppStore:
     def get_agent_name(self, agent_id: str) -> str:
         agent = self.agents.get(agent_id)
         return agent.display_name if agent else agent_id
+
+    def resolve_agent_id(self, agent_reference: str) -> str | None:
+        normalized_reference = agent_reference.strip()
+        if not normalized_reference:
+            return None
+        if normalized_reference in self.agents:
+            return normalized_reference
+        for agent in self.agents.values():
+            if agent.display_name == normalized_reference:
+                return agent.id
+        return None

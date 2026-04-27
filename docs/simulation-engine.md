@@ -11,6 +11,8 @@ The current implementation lives under `simulation/` and is intentionally small.
 - `simulation/engine.py`: orchestration entry point and CLI.
 - `simulation/runtimes/llm.py`: LLM-backed player interface and provider selection.
 - `simulation/runtimes/rule_based.py`: deterministic fallback behavior for local runs and tests.
+- `simulation/trip_planner.py`: friends trip scenario orchestration and CLI.
+- `simulation/runtimes/trip_planner.py`: persona-driven trip-planner runtime and scripted test client.
 
 ## Key pieces in `simulation/engine.py`
 
@@ -58,6 +60,39 @@ Current responsibilities:
 8. publish the result in the group chat
 
 The engine now also cleans up any internally created LLM runtime client factory through `close()`.
+
+## Key pieces in `simulation/trip_planner.py`
+
+### `FriendsTripConfig`
+
+Defines the run configuration for the friends trip scenario.
+
+Important fields:
+
+- `friends`
+- `initiator_name`
+- `destination_options`
+- `max_discussion_rounds`
+- `discussion_seed`
+- `stop_command`
+- `continue_until_stopped`
+- `action_delay_seconds`
+
+### `FriendsTripSimulationEngine`
+
+Runs a group of friends through a destination-planning conversation using the same member-scoped chat surface as the rest of the project.
+
+Current responsibilities:
+
+1. create one admin and one member per friend persona
+2. create one shared group chat and one private brief chat per friend
+3. seed each friend with a private planning brief
+4. let the initiator start the discussion in the group chat
+5. offer speaking opportunities each round while allowing friends to stay quiet and wait for more context
+6. collect each friend's current preference after a round
+7. either auto-finish with a host conclusion or keep running until someone posts the configured stop command
+
+When `continue_until_stopped=True`, the engine behaves like a live chat client: the discussion can continue past the nominal round limit and ends only when the configured stop message appears in the group conversation.
 
 ## Runtime model
 
@@ -127,6 +162,21 @@ Run a simulation against the live server:
 python -m simulation.engine --api-base-url http://127.0.0.1:8000
 ```
 
+Run the friends trip planner against the live server:
+
+```bash
+.venv/bin/python -m simulation.trip_planner --api-base-url http://127.0.0.1:8000
+```
+
+The trip planner uses live LLM-backed friends by default and pauses between actions so the TUI can follow the conversation. Use `--no-delay` when you want the scenario to complete immediately.
+
+Important trip planner flags:
+
+- `--stop-command` to change the exact message that ends a live run
+- `--auto-finish` to re-enable the old round-limited host conclusion flow
+- `--discussion-seed` for reproducible turn-taking
+- `--max-rounds` to control the round limit when `--auto-finish` is enabled
+
 Force rule-based players:
 
 ```bash
@@ -149,3 +199,4 @@ python -m simulation.engine \
 - there is no generic scenario state object yet beyond the Impostor config and result
 - the admin is scripted, not LLM-backed
 - votes are collected through private direct messages, not poll primitives
+- the notebook trip demo is still synchronous, so truly interactive stop-control is cleaner through the live server or TUI than through the in-process notebook flow

@@ -101,7 +101,7 @@ class ChatAdminApp(App[None]):
                 yield Static("Select a conversation with Enter.", id="conversation-meta")
                 yield MessagePanel(id="message-panel")
                 with Horizontal(id="composer"):
-                    yield Input(placeholder="Sender ID", id="sender-input")
+                    yield Input(placeholder="Sender name or ID", id="sender-input")
                     yield Input(placeholder="Type a message", id="message-input")
                     yield Button("Send", id="send-button", variant="primary")
         yield Footer()
@@ -199,11 +199,27 @@ class ChatAdminApp(App[None]):
         self.query_one("#conversation-meta", Static).update(details)
         sender_input = self.query_one("#sender-input", Input)
         if conversation.participant_ids and not sender_input.value:
-            sender_input.value = conversation.participant_ids[0]
+            sender_input.value = self.store.get_agent_name(conversation.participant_ids[0])
 
     @property
     def name_lookup(self) -> dict[str, str]:
         return {agent_id: agent.display_name for agent_id, agent in self.store.agents.items()}
+
+    async def refresh_agents(self) -> bool:
+        try:
+            agents = await self.api_client.list_agents()
+        except httpx.HTTPError as error:
+            self.set_status(f"Failed to refresh members: {error}")
+            return False
+
+        self.store.set_agents(agents)
+        selected_conversation_id = self.store.selected_conversation_id
+        if selected_conversation_id is not None:
+            conversation = self.store.get_conversation(selected_conversation_id)
+            if conversation is not None:
+                self.show_conversation_meta(conversation)
+            self.render_messages(selected_conversation_id)
+        return True
 
     async def subscribe_to_conversation(self, conversation_id: str) -> None:
         await self.shutdown_websocket()
@@ -249,6 +265,8 @@ class ChatAdminApp(App[None]):
             return
 
         message = MessageRecord.from_dict(payload)
+        if message.sender_id not in self.store.agents:
+            await self.refresh_agents()
         self.store.upsert_message(message)
         if message.conversation_id == self.store.selected_conversation_id:
             self.render_messages(message.conversation_id)
@@ -269,6 +287,7 @@ class ChatAdminApp(App[None]):
                 return
 
             conversation = ConversationRecord.from_dict(payload)
+            await self.refresh_agents()
             self.store.upsert_conversation(conversation)
             self.refresh_conversation_table()
             self.set_status("Conversation list updated.")
@@ -309,17 +328,22 @@ class ChatAdminApp(App[None]):
         conversation_id = self.store.selected_conversation_id
         sender_input = self.query_one("#sender-input", Input)
         message_input = self.query_one("#message-input", Input)
-        sender_id = sender_input.value.strip()
+        sender_reference = sender_input.value.strip()
         content = message_input.value.strip()
 
         if not conversation_id:
             self.set_status("Select a conversation before sending a message.")
             return
-        if not sender_id:
-            self.set_status("Provide a sender ID.")
+        if not sender_reference:
+            self.set_status("Provide a sender name or ID.")
             return
         if not content:
             self.set_status("Message content cannot be empty.")
+            return
+
+        sender_id = self.store.resolve_agent_id(sender_reference)
+        if sender_id is None:
+            self.set_status(f"Unknown sender: {sender_reference}")
             return
 
         try:

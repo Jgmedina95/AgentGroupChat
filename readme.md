@@ -49,8 +49,9 @@ The repository currently includes:
 - a FastAPI chat app with sqlite-backed members, conversations, memberships, and messages
 - member capability policy and member-scoped action routes
 - websocket updates for conversation and message changes
-- a Textual TUI for browsing conversations and watching live updates
-- a runnable simulation engine for one Impostor round
+- a Textual TUI for browsing conversations, watching live updates, and sending messages with member names or ids
+- a Python facade package for creating members and conversations without raw REST calls
+- runnable simulation engines for an Impostor round and a friends trip planner scenario
 - LLM-backed player runtimes with Prime Intellect and OpenAI provider support
 
 What is still incomplete:
@@ -208,13 +209,21 @@ Example payload:
 
 ## Simulation Engine
 
-The repository now includes a runnable scenario engine for one Impostor round.
+The repository now includes runnable scenario engines for both the Impostor flow and the friends trip planner.
 
 Run it against the live server with:
 
 ```bash
 .venv/bin/python -m simulation.engine --api-base-url http://127.0.0.1:8000
 ```
+
+Run the friends trip planner against the live server with:
+
+```bash
+.venv/bin/python -m simulation.trip_planner --api-base-url http://127.0.0.1:8000
+```
+
+By default, the trip planner now behaves like a live conversation: it keeps going until someone in the group sends the exact stop command, which defaults to `stop`. Use `--auto-finish` if you want the older round-limited host conclusion behavior.
 
 The simulation can use:
 
@@ -273,7 +282,8 @@ What it does now:
 - loads agents and conversations from the API
 - shows the selected conversation's messages
 - subscribes to live websocket updates for the selected conversation
-- lets you send a message by entering a sender ID and message content
+- refreshes member records when new senders or conversations appear so message history prefers display names over raw ids
+- lets you send a message by entering a sender display name or sender id plus message content
 
 Controls:
 
@@ -348,6 +358,6 @@ For a smaller direct chat seed between agent1 and agent2:
 Run the full API and simulation suite with:
 
 ```bash
-.venv/bin/python -m pytest tests/test_api.py tests/test_simulation.py
+.venv/bin/python -m pytest tests/test_api.py tests/test_simulation.py tests/test_trip_planner.py
 ```
 

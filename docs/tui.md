@@ -41,6 +41,7 @@ Important consequences:
 
 - new conversations can appear without a manual refresh
 - selected conversation messages update live
+- when a message arrives from an unknown sender, the TUI refreshes member records so the message panel can render display names instead of raw ids
 - membership and pause or resume changes can be surfaced through `conversation.updated` and other websocket events
 
 The current code no longer depends on a constant background polling loop for normal live updates.
@@ -52,7 +53,7 @@ Current TUI capabilities:
 - browse conversations
 - inspect message history
 - watch live message updates
-- send a message by entering a sender id and content
+- send a message by entering a sender display name or sender id plus content
 - manually refresh loaded data
 
 Current limitations:
