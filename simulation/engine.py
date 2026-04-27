@@ -6,13 +6,14 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-import httpx
+import chatapp
+from chatapp.gateway import DEFAULT_API_BASE_URL, HttpChatGateway, RestChatGateway, TestClientChatGateway
+from chatapp.runtimes import attach_llm_runtimes
 
 from simulation.runtimes.llm import LLMPlayerRuntimeFactory
 from simulation.runtimes.rule_based import build_vote_map, choose_clue
 
 
-DEFAULT_API_BASE_URL = "http://localhost:8000"
 DEFAULT_GROUP_TITLE = "Impostor"
 DEFAULT_READY_TEXT = "Ready"
 DEFAULT_ASSIGNMENT_NOTICE = "Group chat is temporarily paused while private words are assigned."
@@ -54,110 +55,6 @@ class ImpostorSimulationResult:
 	impostor_eliminated: bool
 
 
-class RestChatGateway:
-	def __init__(self, client: Any) -> None:
-		self._client = client
-
-	def create_member(
-		self,
-		*,
-		display_name: str,
-		runtime_type: str,
-		member_type: str,
-		capabilities: dict[str, bool] | None = None,
-		config: dict[str, Any] | None = None,
-	) -> dict[str, Any]:
-		response = self._client.post(
-			"/api/members",
-			json={
-				"display_name": display_name,
-				"type": runtime_type,
-				"member_type": member_type,
-				"capabilities": capabilities,
-				"config": config,
-			},
-		)
-		response.raise_for_status()
-		return response.json()
-
-	def create_group_conversation(
-		self,
-		*,
-		admin_member_id: str,
-		title: str,
-		member_ids: list[str],
-	) -> dict[str, Any]:
-		response = self._client.post(
-			f"/api/members/{admin_member_id}/conversations/group",
-			json={"title": title, "member_ids": member_ids},
-		)
-		response.raise_for_status()
-		return response.json()
-
-	def create_direct_conversation(
-		self,
-		*,
-		title: str,
-		participant_ids: list[str],
-	) -> dict[str, Any]:
-		response = self._client.post(
-			"/api/conversations",
-			json={"type": "direct", "title": title, "participant_ids": participant_ids},
-		)
-		response.raise_for_status()
-		return response.json()
-
-	def post_member_message(self, *, member_id: str, conversation_id: str, content: str) -> dict[str, Any]:
-		response = self._client.post(
-			f"/api/members/{member_id}/messages",
-			json={"conversation_id": conversation_id, "content": content},
-		)
-		response.raise_for_status()
-		return response.json()
-
-	def pause_group_messages(self, *, admin_member_id: str, conversation_id: str, notice: str) -> dict[str, Any]:
-		response = self._client.post(
-			f"/api/conversations/{conversation_id}/pause-messages",
-			json={"acting_member_id": admin_member_id, "notice": notice},
-		)
-		response.raise_for_status()
-		return response.json()
-
-	def resume_group_messages(self, *, admin_member_id: str, conversation_id: str) -> dict[str, Any]:
-		response = self._client.post(
-			f"/api/conversations/{conversation_id}/resume-messages",
-			json={"acting_member_id": admin_member_id},
-		)
-		response.raise_for_status()
-		return response.json()
-
-	def list_conversation_messages(self, conversation_id: str) -> list[dict[str, Any]]:
-		response = self._client.get(f"/api/conversations/{conversation_id}/messages")
-		response.raise_for_status()
-		return response.json()
-
-	def list_member_visible_messages(self, member_id: str, conversation_id: str) -> list[dict[str, Any]]:
-		response = self._client.get(f"/api/members/{member_id}/conversations/{conversation_id}/messages")
-		response.raise_for_status()
-		return response.json()
-
-
-class HttpChatGateway(RestChatGateway):
-	def __init__(self, base_url: str = DEFAULT_API_BASE_URL, timeout: float = 10.0) -> None:
-		client = httpx.Client(base_url=base_url.rstrip("/"), timeout=timeout)
-		super().__init__(client)
-		self._http_client = client
-
-	def close(self) -> None:
-		self._http_client.close()
-
-
-class TestClientChatGateway(RestChatGateway):
-	__test__ = False
-
-	pass
-
-
 class ImpostorSimulationEngine:
 	def __init__(
 		self,
@@ -174,70 +71,49 @@ class ImpostorSimulationEngine:
 			raise ValueError("The initial impostor simulation expects exactly four players")
 
 		chooser = random.Random(config.random_seed)
-		admin = self._gateway.create_member(
-			display_name=config.admin_name,
-			runtime_type=config.admin_runtime_type,
-			member_type="admin",
-		)
+		server = chatapp.init_server(gateway=self._gateway)
+		admin = server.add_member(name=config.admin_name, runtime_type=config.admin_runtime_type, member_type="admin")
 		players = [
-			self._gateway.create_member(
-				display_name=player_name,
+			server.add_member(
+				name=player_name,
 				runtime_type=config.player_runtime_type,
 				member_type="user_regular",
 				config={"simulation_runtime": config.player_runtime_type},
 			)
 			for player_name in config.player_names
 		]
-		player_ids_by_name = {player["display_name"]: player["id"] for player in players}
+		player_ids_by_name = {player.display_name: player.id for player in players}
 
-		group_conversation = self._gateway.create_group_conversation(
-			admin_member_id=admin["id"],
-			title=config.group_title,
-			member_ids=[player["id"] for player in players],
-		)
+		group_conversation = server.open_session(title=config.group_title, owner=admin)
+		for player in players:
+			group_conversation.add_member(acting_member=admin, member=player)
 		self._sleep(config.action_delay_seconds)
 
 		private_conversations = {
-			player_name: self._gateway.create_direct_conversation(
+			player.display_name: admin.start_direct_chat(
 				title=f"{config.admin_name} and {player_name}",
-				participant_ids=[admin["id"], player_ids_by_name[player_name]],
+				members=[player],
 			)
-			for player_name in config.player_names
+			for player_name, player in zip(config.player_names, players, strict=True)
 		}
 		self._sleep(config.action_delay_seconds)
-		llm_player_runtimes = self._build_llm_player_runtimes(config, player_ids_by_name)
+		llm_player_runtimes = self._build_llm_player_runtimes(config, players)
 
-		self._gateway.post_member_message(
-			member_id=admin["id"],
-			conversation_id=group_conversation["id"],
-			content=RULES_TEXT,
-		)
+		admin.send_message(group_conversation, RULES_TEXT)
 
 		for player in players:
-			player_name = player["display_name"]
+			player_name = player.display_name
 			ready_response = config.ready_text
 			if llm_player_runtimes is not None:
 				ready_response = llm_player_runtimes[player_name].decide_ready(
-					group_conversation_id=group_conversation["id"],
+					group_conversation_id=group_conversation.id,
 					ready_text=config.ready_text,
 				)
-			self._gateway.post_member_message(
-				member_id=player["id"],
-				conversation_id=group_conversation["id"],
-				content=ready_response,
-			)
+			player.send_message(group_conversation, ready_response)
 			self._sleep(config.action_delay_seconds)
 
-		self._gateway.post_member_message(
-			member_id=admin["id"],
-			conversation_id=group_conversation["id"],
-			content=DEFAULT_ASSIGNMENT_NOTICE,
-		)
-		self._gateway.pause_group_messages(
-			admin_member_id=admin["id"],
-			conversation_id=group_conversation["id"],
-			notice=DEFAULT_ASSIGNMENT_NOTICE,
-		)
+		admin.send_message(group_conversation, DEFAULT_ASSIGNMENT_NOTICE)
+		admin.pause_group_chat(group_conversation, DEFAULT_ASSIGNMENT_NOTICE)
 
 		impostor_player_name = config.impostor_player_name or chooser.choice(config.player_names)
 		assignments_by_player_name = {
@@ -246,57 +122,36 @@ class ImpostorSimulationEngine:
 		}
 
 		for player_name, word in assignments_by_player_name.items():
-			self._gateway.post_member_message(
-				member_id=admin["id"],
-				conversation_id=private_conversations[player_name]["id"],
-				content=f"Your secret word is: {word}",
-			)
+			admin.send_message(private_conversations[player_name], f"Your secret word is: {word}")
 			self._sleep(config.action_delay_seconds)
 
-		group_conversation = self._gateway.resume_group_messages(
-			admin_member_id=admin["id"],
-			conversation_id=group_conversation["id"],
-		)
-		self._gateway.post_member_message(
-			member_id=admin["id"],
-			conversation_id=group_conversation["id"],
-			content="Round 1 begins now.",
-		)
+		admin.resume_group_chat(group_conversation)
+		admin.send_message(group_conversation, "Round 1 begins now.")
 
 		clue_order = config.clue_order or chooser.sample(config.player_names, len(config.player_names))
 		for player_name in clue_order:
 			if llm_player_runtimes is not None:
 				clue = llm_player_runtimes[player_name].decide_clue(
-					group_conversation_id=group_conversation["id"],
-					private_conversation_id=private_conversations[player_name]["id"],
+					group_conversation_id=group_conversation.id,
+					private_conversation_id=private_conversations[player_name].id,
 				)
 			else:
 				clue = choose_clue(assignments_by_player_name[player_name], chooser)
-			self._gateway.post_member_message(
-				member_id=player_ids_by_name[player_name],
-				conversation_id=group_conversation["id"],
-				content=f"{player_name} clue: {clue}",
-			)
+			server_member = next(player for player in players if player.display_name == player_name)
+			server_member.send_message(group_conversation, f"{player_name} clue: {clue}")
 			self._sleep(config.action_delay_seconds)
 
 		votes_by_player_name = build_vote_map(config.player_names, impostor_player_name) if llm_player_runtimes is None else {}
 		for player_name in config.player_names:
-			self._gateway.post_member_message(
-				member_id=admin["id"],
-				conversation_id=private_conversations[player_name]["id"],
-				content="Cast your vote for the player you think has a different word.",
-			)
+			admin.send_message(private_conversations[player_name], "Cast your vote for the player you think has a different word.")
 			if llm_player_runtimes is not None:
 				votes_by_player_name[player_name] = llm_player_runtimes[player_name].decide_vote(
-					group_conversation_id=group_conversation["id"],
-					private_conversation_id=private_conversations[player_name]["id"],
+					group_conversation_id=group_conversation.id,
+					private_conversation_id=private_conversations[player_name].id,
 					player_names=config.player_names,
 				)
-			self._gateway.post_member_message(
-				member_id=player_ids_by_name[player_name],
-				conversation_id=private_conversations[player_name]["id"],
-				content=votes_by_player_name[player_name],
-			)
+			server_member = next(player for player in players if player.display_name == player_name)
+			server_member.send_message(private_conversations[player_name], votes_by_player_name[player_name])
 			self._sleep(config.action_delay_seconds)
 
 		vote_totals: dict[str, int] = {player_name: 0 for player_name in config.player_names}
@@ -310,11 +165,7 @@ class ImpostorSimulationEngine:
 		vote_summary = ", ".join(
 			f"{player_name}={vote_totals[player_name]}" for player_name in sorted(vote_totals)
 		)
-		self._gateway.post_member_message(
-			member_id=admin["id"],
-			conversation_id=group_conversation["id"],
-			content=f"Vote results: {vote_summary}",
-		)
+		admin.send_message(group_conversation, f"Vote results: {vote_summary}")
 
 		impostor_eliminated = eliminated_player_name == impostor_player_name
 		end_message = (
@@ -322,17 +173,13 @@ class ImpostorSimulationEngine:
 			if impostor_eliminated
 			else f"Impostor survives this round: {impostor_player_name}."
 		)
-		self._gateway.post_member_message(
-			member_id=admin["id"],
-			conversation_id=group_conversation["id"],
-			content=end_message,
-		)
+		admin.send_message(group_conversation, end_message)
 
 		return ImpostorSimulationResult(
-			admin_member=admin,
-			players=players,
-			group_conversation=group_conversation,
-			private_conversations=private_conversations,
+			admin_member=admin.payload,
+			players=[player.payload for player in players],
+			group_conversation=group_conversation.payload,
+			private_conversations={player_name: conversation.payload for player_name, conversation in private_conversations.items()},
 			player_ids_by_name=player_ids_by_name,
 			assignments_by_player_name=assignments_by_player_name,
 			votes_by_player_name=votes_by_player_name,
@@ -350,7 +197,7 @@ class ImpostorSimulationEngine:
 	def _build_llm_player_runtimes(
 		self,
 		config: ImpostorGameConfig,
-		player_ids_by_name: dict[str, str],
+		players: list[chatapp.ChatMember],
 	) -> dict[str, Any] | None:
 		if config.player_runtime_type != "llm":
 			return None
@@ -360,14 +207,7 @@ class ImpostorSimulationEngine:
 			if self._owned_llm_runtime_factory is None:
 				self._owned_llm_runtime_factory = LLMPlayerRuntimeFactory.from_environment(config.llm_provider)
 			factory = self._owned_llm_runtime_factory
-		return {
-			player_name: factory.create(
-				player_name=player_name,
-				member_id=player_ids_by_name[player_name],
-				gateway=self._gateway,
-			)
-			for player_name in config.player_names
-		}
+		return attach_llm_runtimes(players, factory=factory)
 
 	def close(self) -> None:
 		if self._owned_llm_runtime_factory is None:

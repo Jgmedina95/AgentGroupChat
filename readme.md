@@ -218,6 +218,35 @@ Run it against the live server with:
 
 The simulation can use:
 
+## Python Facade
+
+The repository now includes a small Python facade package so simulations can work with members and conversations instead of raw REST calls.
+
+```python
+import chatapp
+from chatapp.options import pause_group_chat, read_messages, resume_group_chat, send_messages
+
+server = chatapp.init_server(base_url="http://127.0.0.1:8000")
+
+admin = server.add_member(
+	name="Admin",
+	runtime_type="human",
+	member_type="admin",
+	functionalities=[send_messages, read_messages, pause_group_chat, resume_group_chat],
+)
+claudia = server.add_member(
+	name="Claudia",
+	runtime_type="llm",
+	functionalities=[send_messages, read_messages],
+)
+
+session = server.open_session(title="Impostor", owner=admin)
+session.add_member(acting_member=admin, member=claudia)
+admin.send_message(session, "Rules of the game")
+```
+
+LLM-backed members can still use the existing runtime layer. The facade only changes how the simulation code talks to the chat system.
+
 - rule-based players
 - Prime Intellect LLM players
 - OpenAI-compatible LLM players

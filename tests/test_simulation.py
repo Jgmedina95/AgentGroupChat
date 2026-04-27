@@ -6,7 +6,9 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+import chatapp
 import api.websockets as websocket_module
+from chatapp.options import pause_group_chat, read_messages, resume_group_chat, send_messages
 from app_env import load_environment
 from db.session import create_connection, get_db, init_db
 from main import app
@@ -148,6 +150,44 @@ def test_impostor_engine_can_use_llm_player_runtime(client: TestClient) -> None:
     assert "Player 2 clue: cider" in group_contents
     assert "Player 3 clue: crisp" in group_contents
     assert "Player 4 clue: green" in group_contents
+
+
+def test_chatapp_facade_supports_member_actions(client: TestClient) -> None:
+    gateway = TestClientChatGateway(client)
+    server = chatapp.init_server(gateway=gateway)
+
+    admin = server.add_member(
+        name="Admin",
+        runtime_type="human",
+        member_type="admin",
+        functionalities=[send_messages, read_messages, pause_group_chat, resume_group_chat],
+    )
+    player = server.add_member(
+        name="Claudia",
+        runtime_type="llm",
+        member_type="user_regular",
+        functionalities=[send_messages, read_messages],
+    )
+
+    group = server.open_session(title="Facade Session", owner=admin)
+    group.add_member(acting_member=admin, member=player)
+    admin.send_message(group, "hello from admin")
+
+    visible_messages = player.read_messages(group)
+    assert [message["content"] for message in visible_messages] == ["hello from admin"]
+
+    admin.pause_group_chat(group, "Hold please")
+    assert group.messages_paused is True
+
+    with pytest.raises(Exception):
+        player.send_message(group, "this should fail while paused")
+
+    admin.resume_group_chat(group)
+    assert group.messages_paused is False
+
+    player.send_message(group, "back again")
+    group_messages = gateway.list_conversation_messages(group.id)
+    assert [message["content"] for message in group_messages] == ["hello from admin", "back again"]
 
 
 def test_primeintellect_provider_config_uses_prime_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
